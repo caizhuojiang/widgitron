@@ -1,0 +1,46 @@
+{
+    "servers": [
+        {
+            "host": "localhost",
+            "user": null,
+            "password": null,
+            "key_file": null,
+            "port": null,
+            "proxy": null
+        },
+        {
+            "host": "example.com",
+            "user": "username",
+            "password": null,
+            "key_file": "~/.ssh/id_rsa",
+            "port": 22,
+            "proxy": null,
+            "comment": "Example server configuration"
+        },
+        {
+            "host": "server-with-proxy.com",
+            "user": "username",
+            "password": null,
+            "key_file": null,
+            "port": 22,
+            "proxy": {
+                "host": "jump-server.com",
+                "port": 22,
+                "user": "proxyuser",
+                "password": null,
+                "key_file": "~/.ssh/id_rsa"
+            },
+            "comment": "Server accessed through jump host"
+        }
+    ],
+    "update_interval": 1,
+    "idle_threshold": 300,
+    "widget_size": [
+        567,
+        1420
+    ],
+    "widget_position": [
+        1868,
+        15
+    ]
+}

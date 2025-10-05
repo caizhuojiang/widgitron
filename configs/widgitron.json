@@ -1,0 +1,41 @@
+{
+    "app_name": "Widgitron",
+    "version": "0.1.0",
+    "description": "A modular desktop widget framework for researchers and developers",
+    
+    "startup": {
+        "show_main_window": false,
+        "minimize_to_tray": true
+    },
+    
+    "widgets": {
+        "enabled": [
+            {
+                "name": "gpu_monitor",
+                "class": "GPUMonitor",
+                "module": "widgets.gpu_monitor",
+                "config_file": "configs/gpu_monitor.json",
+                "auto_start": true,
+                "description": "GPU monitoring widget for multiple servers"
+            }
+        ],
+        "disabled": []
+    },
+    
+    "tray_icon": {
+        "show": true,
+        "tooltip": "Widgitron - Desktop Widget Framework"
+    },
+    
+    "main_window": {
+        "title": "Widgitron Control Panel",
+        "width": 1200,
+        "height": 800,
+        "position": "center"
+    },
+    
+    "theme": {
+        "style": "default",
+        "dark_mode": false
+    }
+}
