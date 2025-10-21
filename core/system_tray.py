@@ -26,15 +26,22 @@ class SystemTrayManager:
         tray_config = self.main_window.config.get('tray_icon', {})
         tooltip = tray_config.get('tooltip', 'Widgitron')
 
+        # Right-click menu with Exit option
+        # The first menu item will be treated as default (left-click action)
         menu = (
-            item('Show Control Panel', self.main_window.show_control_panel),
-            item('GPU Monitor', self.main_window.toggle_gpu_monitor),
-            item('Exit', self.main_window.quit_application)
+            item('Show', self.show_control_panel),
+            item('Exit', self.main_window.quit_application),
         )
 
-        # Create icon
+        # Create icon with default menu item (Show) set to index 0
         icon_image = self.create_icon()
-        self.tray_icon = pystray.Icon("widgitron", icon_image, tooltip, menu)
+        self.tray_icon = pystray.Icon(
+            "widgitron", 
+            icon_image, 
+            tooltip, 
+            menu,
+            default_menu_index=0  # Set "Show" as the default action for left-click
+        )
 
         # Run in separate thread
         self.tray_thread = threading.Thread(target=self.tray_icon.run)
@@ -81,19 +88,6 @@ class SystemTrayManager:
         self.main_window.showNormal()
         self.main_window.activateWindow()
         self.main_window.raise_()
-
-    def quit_application(self):
-        """Quit the entire application"""
-        # Close all active widgets
-        for widget in list(self.main_window.active_widgets.values()):
-            widget.close()
-
-        # Stop tray icon
-        if self.tray_icon:
-            self.tray_icon.stop()
-
-        # Quit application
-        QApplication.quit()
 
     def cleanup(self):
         """Clean up system tray resources"""

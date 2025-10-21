@@ -1,26 +1,28 @@
 # Widgitron
 
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Python](https://img.shields.io/badge/python-3.7+-green)
+![License](https://img.shields.io/badge/license-MIT-orange)
+
 <img src="icons/widgitron.png" alt="Widgitron Logo" width="150">
 
 **A modular desktop widget framework for researchers and developers**
 
 Build AI-powered dashboards and monitoring tools with Python and PyQt5. Create beautiful, floating desktop widgets that are always accessible.
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![Python](https://img.shields.io/badge/python-3.7+-green)
-![License](https://img.shields.io/badge/license-MIT-orange)
-
+<img src="assets/screenshot.jpg" alt="Screenshot" width="500">
 
 ## 🗺️ Roadmap
 
 ### ✅ Completed
 - [x] Main framework setup
 - [x] GPU monitor widget
+- [x] Paper deadline widget
+- [x] Compact GPU monitor widget style
+- [x] Widget settings
 
 ### 🚧 Planned
-- [ ] Paper deadline widget
 - [ ] Paper monitoring update widget
-- [ ] More GPU monitor widget styles
 - [ ] Server file management widget
 - [ ] More widgets
 - [ ] Plugin system for third-party widgets
@@ -54,7 +56,6 @@ pip install -r requirements.txt
             "port": 22
         }
     ],
-    "update_interval": 1
 }
 ```
 
@@ -72,11 +73,17 @@ python widgitron.py
 
 Monitor GPU usage on multiple remote servers:
 - 📡 SSH connection support
-- 🔄 Real-time updates
 - 🔔 Idle notifications
 - 🌐 Proxy/jump host support
-- 💾 Memory usage tracking
-- ⚡ Utilization percentage
+
+### Paper Deadline Monitor
+
+Track upcoming conference deadlines with countdowns:
+
+Features:
+- ⏳ Countdown (d/h/m/s)
+- 🎯 Filter settings support
+- 🔁 Auto-sort by nearest deadline
 
 ## 🤝 Contributing
 

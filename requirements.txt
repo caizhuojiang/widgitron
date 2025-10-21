@@ -4,3 +4,5 @@ plyer
 Pillow
 PyQt5
 pyinstaller
+PyYAML
+requests

@@ -11,31 +11,56 @@ class WidgetManager:
 
     def __init__(self, main_window):
         self.main_window = main_window
+        # Widget class mapping for dynamic instantiation
+        self.widget_classes = {
+            'gpu_monitor': ('widgets.gpu_monitor', 'GPUMonitor'),
+            'paper_deadline': ('widgets.paper_deadline', 'PaperDeadline'),
+        }
 
     def auto_start_widgets(self):
-        """Auto-start widgets configured in widgitron.json"""
-        enabled_widgets = self.main_window.config.get('widgets', {}).get('enabled', [])
-
-        for widget_config in enabled_widgets:
-            if widget_config.get('auto_start', False):
-                widget_name = widget_config['name']
+        """Auto-start widgets configured in their individual config files"""
+        for widget_id, (module_name, class_name) in self.widget_classes.items():
+            try:
+                # Import the widget module
+                module = __import__(module_name, fromlist=[class_name])
+                widget_class = getattr(module, class_name)
+                
+                # Check if widget should auto-start
+                config_path = f'configs/{widget_id}.json'
                 try:
-                    if widget_name == 'gpu_monitor':
-                        self._start_gpu_monitor()
+                    import json
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    if config.get('auto_start', True):
+                        self._start_widget(widget_id)
                         # Update button state after auto-start
-                        if hasattr(self.main_window, 'gpu_monitor_btn'):
-                            self.main_window.gpu_monitor_btn.setObjectName("widgetButtonActive")
-                            self.main_window.gpu_monitor_btn.setStyle(self.main_window.gpu_monitor_btn.style())
-                    # Add other widgets here in the future
-                    print(f"Auto-started {widget_name}")
+                        button_attr = f"{widget_id}_btn"
+                        if hasattr(self.main_window, button_attr):
+                            getattr(self.main_window, button_attr).setObjectName("widgetButtonActive")
+                            getattr(self.main_window, button_attr).setStyle(getattr(self.main_window, button_attr).style())
+                        print(f"Auto-started {widget_id}")
+                except FileNotFoundError:
+                    # If config doesn't exist, default to auto-start
+                    self._start_widget(widget_id)
+                    print(f"Auto-started {widget_id} (no config found)")
                 except Exception as e:
-                    print(f"Failed to auto-start {widget_name}: {e}")
+                    print(f"Failed to check auto-start for {widget_id}: {e}")
+            except Exception as e:
+                print(f"Failed to auto-start {widget_id}: {e}")
 
     def toggle_widget(self, widget_id, button):
         """Toggle widget on/off"""
-        if widget_id == 'gpu_monitor':
-            self.toggle_gpu_monitor()
-        # Add other widgets here
+        if widget_id in self.main_window.active_widgets:
+            # Close existing widget
+            self.main_window.active_widgets[widget_id].close()
+            del self.main_window.active_widgets[widget_id]
+        else:
+            # Create new widget
+            try:
+                self._start_widget(widget_id)
+            except Exception as e:
+                QMessageBox.critical(self.main_window, "Error", f"Failed to launch {widget_id.replace('_', ' ').title()}:\n{str(e)}")
+                return
 
         # Update button style
         if widget_id in self.main_window.active_widgets:
@@ -44,33 +69,18 @@ class WidgetManager:
             button.setObjectName("widgetButtonInactive")
         button.setStyle(button.style())  # Force style refresh
 
-    def toggle_gpu_monitor(self):
-        """Toggle GPU Monitor widget"""
-        widget_name = 'gpu_monitor'
+    def _start_widget(self, widget_id):
+        """Start a widget by ID"""
+        if widget_id not in self.widget_classes:
+            raise ValueError(f"Unknown widget: {widget_id}")
 
-        if widget_name in self.main_window.active_widgets:
-            # Close existing
-            self.main_window.active_widgets[widget_name].close()
-            del self.main_window.active_widgets[widget_name]
-            if hasattr(self.main_window, 'gpu_monitor_btn'):
-                self.main_window.gpu_monitor_btn.setObjectName("widgetButtonInactive")
-                self.main_window.gpu_monitor_btn.setStyle(self.main_window.gpu_monitor_btn.style())
-        else:
-            # Create new
-            try:
-                self._start_gpu_monitor()
-                if hasattr(self.main_window, 'gpu_monitor_btn'):
-                    self.main_window.gpu_monitor_btn.setObjectName("widgetButtonActive")
-                    self.main_window.gpu_monitor_btn.setStyle(self.main_window.gpu_monitor_btn.style())
-            except Exception as e:
-                QMessageBox.critical(self.main_window, "Error", f"Failed to launch GPU Monitor:\n{str(e)}")
+        module_name, class_name = self.widget_classes[widget_id]
+        module = __import__(module_name, fromlist=[class_name])
+        widget_class = getattr(module, class_name)
 
-    def _start_gpu_monitor(self):
-        """Start GPU Monitor widget"""
-        from widgets.gpu_monitor import GPUMonitor
-        gpu_monitor = GPUMonitor()
-        gpu_monitor.show()
-        self.main_window.active_widgets['gpu_monitor'] = gpu_monitor
+        widget = widget_class()
+        widget.show()
+        self.main_window.active_widgets[widget_id] = widget
 
     def add_widget(self):
         """Add a new widget - placeholder for future implementation"""

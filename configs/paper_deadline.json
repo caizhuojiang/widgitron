@@ -1,0 +1,23 @@
+{
+    "update_interval": 21600,
+    "max_deadlines": 5,
+    "widget_size": [
+        500,
+        616
+    ],
+    "show_past_deadlines": false,
+    "filter_by_rank": [
+        "A",
+        "B"
+    ],
+    "filter_by_sub": [
+        "AI",
+        "CG"
+    ],
+    "widget_position": [
+        1394,
+        41
+    ],
+    "auto_start": true,
+    "font_size": 10
+}

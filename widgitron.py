@@ -6,11 +6,9 @@ Main application entry point with control panel and system tray integration
 import sys
 import os
 import json
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QPushButton, QLabel, QListWidget, QHBoxLayout, QMessageBox,
-                             QGraphicsDropShadowEffect, QGridLayout, QFrame, QStackedWidget)
-from PyQt5.QtCore import Qt, QTimer, QSize, QPoint, QEvent
-from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QGraphicsDropShadowEffect)
+from PyQt5.QtCore import Qt, QTimer, QEvent
+from PyQt5.QtGui import QFont, QIcon, QColor
 
 from core.ui_manager import UIManager
 from core.window_manager import WindowManager

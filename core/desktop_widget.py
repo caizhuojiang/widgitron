@@ -58,6 +58,18 @@ class DesktopWidget(QWidget):
             y = (screen.height() - self.height()) // 2
             self.move(x, y)
     
+    def reload_font_size(self):
+        """Reload font size from config and refresh UI"""
+        # Reload config to get latest font_size
+        self.config = self.load_config()
+        self.font_size = self.config.get('font_size', 10)
+        # Subclasses should override this method to apply font changes
+        self.on_font_size_changed()
+    
+    def on_font_size_changed(self):
+        """Called when font size changes - subclasses should override this"""
+        pass
+    
     def __init__(self, size=(300, 200), config_path=None, debug=False):
         super().__init__()
         
@@ -81,6 +93,9 @@ class DesktopWidget(QWidget):
             self.content_width, self.content_height = config_size
         else:
             self.content_width, self.content_height = default_size
+        
+        # Font size configuration
+        self.font_size = self.config.get('font_size', 10)
         
         # Add margin around content for button area (transparent region)
         self.margin = 60  # Margin for buttons and transparent area
