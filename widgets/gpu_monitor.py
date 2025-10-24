@@ -156,15 +156,97 @@ class GPUWorker(QThread):
         super().__init__()
         self.servers = servers
         self.running = True
+        self.ssh_connections = {}  # Persistent SSH connections cache
+        self.connection_errors = {}  # Track connection errors per server
+        self.update_interval = UPDATE_INTERVAL  # Store current interval
     
     def run(self):
+        # Initialize SSH connections on startup
+        self._initialize_connections()
+        
         while self.running:
             gpu_data = {}
             for server in self.servers:
                 info = self.get_gpu_info(server)
                 gpu_data[get_server_id(server)] = info
             self.data_ready.emit(gpu_data)
-            time.sleep(UPDATE_INTERVAL)
+            # Use current update interval (may be changed by settings)
+            time.sleep(self.update_interval)
+        
+        # Close all connections on exit
+        self._close_all_connections()
+    
+    def _initialize_connections(self):
+        """Initialize SSH connections for all servers at startup"""
+        for server in self.servers:
+            server_id = get_server_id(server)
+            # Skip localhost - doesn't need SSH
+            if server['host'] not in ['localhost', '127.0.0.1']:
+                # Initialize connection (will be established on first use)
+                self.ssh_connections[server_id] = None
+                self.connection_errors[server_id] = None
+    
+    def _get_ssh_connection(self, server):
+        """Get or establish an SSH connection for a server"""
+        server_id = get_server_id(server)
+        
+        # Check if connection already exists and is alive
+        if server_id in self.ssh_connections and self.ssh_connections[server_id] is not None:
+            try:
+                # Test connection by sending a no-op command
+                self.ssh_connections[server_id].exec_command('true')
+                # Connection is still alive
+                self.connection_errors[server_id] = None
+                return self.ssh_connections[server_id]
+            except Exception:
+                # Connection is dead, close it
+                try:
+                    self.ssh_connections[server_id].close()
+                except Exception:
+                    pass
+                self.ssh_connections[server_id] = None
+        
+        # Try to establish a new connection
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Connect with password or key
+            port = server.get('port', 22)
+            if server.get('key_file') and os.path.exists(server['key_file']):
+                ssh.connect(server['host'], port=port, username=server['user'], 
+                           key_filename=server['key_file'], timeout=10)
+            else:
+                default_key = os.path.expanduser('~/.ssh/id_rsa')
+                if os.path.exists(default_key):
+                    ssh.connect(server['host'], port=port, username=server['user'], 
+                               key_filename=default_key, timeout=10)
+                else:
+                    ssh.connect(server['host'], port=port, username=server['user'], 
+                               password=server['password'], timeout=10)
+            
+            self.ssh_connections[server_id] = ssh
+            self.connection_errors[server_id] = None
+            return ssh
+        except Exception as e:
+            self.ssh_connections[server_id] = None
+            self.connection_errors[server_id] = str(e)
+            return None
+    
+    def _close_all_connections(self):
+        """Close all SSH connections"""
+        for server_id, ssh in self.ssh_connections.items():
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+        self.ssh_connections.clear()
+        self.connection_errors.clear()
+    
+    def set_update_interval(self, interval):
+        """Update the polling interval (called when settings change)"""
+        self.update_interval = interval
     
     def get_gpu_info(self, server):
         try:
@@ -189,23 +271,18 @@ class GPUWorker(QThread):
                 result = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
                 output = result.stdout.strip()
             else:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # Use persistent SSH connection
+                ssh = self._get_ssh_connection(server)
+                if ssh is None:
+                    error_msg = self.connection_errors.get(get_server_id(server), "Connection failed")
+                    return {
+                        'gpu_list': [],
+                        'gpu_info': f"Error: {error_msg}"
+                    }
                 
-                # Connect with password or key
-                port = server.get('port', 22)
-                if server.get('key_file') and os.path.exists(server['key_file']):
-                    ssh.connect(server['host'], port=port, username=server['user'], key_filename=server['key_file'])
-                else:
-                    default_key = os.path.expanduser('~/.ssh/id_rsa')
-                    if os.path.exists(default_key):
-                        ssh.connect(server['host'], port=port, username=server['user'], key_filename=default_key)
-                    else:
-                        ssh.connect(server['host'], port=port, username=server['user'], password=server['password'])
-                
+                # Execute command using existing connection
                 stdin, stdout, stderr = ssh.exec_command('nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits')
                 output = stdout.read().decode('utf-8').strip()
-                ssh.close()
             
             if output:
                 lines = output.split('\n')
@@ -663,6 +740,12 @@ class GPUMonitor(DesktopWidget):
         
         # Update global config (use globals() to properly update the global variable)
         GPU_CONFIG.update(config)
+        
+        # Update worker's update interval if it changed
+        if interval_combo:
+            for instance in GPUMonitor.active_instances:
+                if hasattr(instance, 'worker') and instance.worker:
+                    instance.worker.set_update_interval(update_interval)
         
         # Refresh any active GPU Monitor widgets
         if style_combo:

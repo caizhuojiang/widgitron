@@ -9,6 +9,14 @@ import time
 import requests
 import yaml
 from datetime import datetime, timezone
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except Exception:
+    # Fallback - ZoneInfo not available (very old Python). We'll fall back to UTC only.
+    ZoneInfo = None
+    class ZoneInfoNotFoundError(Exception):
+        pass
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QPushButton
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QPoint
 from PyQt5.QtGui import QFont
@@ -55,6 +63,141 @@ def format_ccf_rank(rank):
     return rank_map.get(rank, rank)
 
 
+def _parse_deadline_with_timezone(deadline_str, tz_name=None):
+    """Parse a deadline string and return a timezone-aware datetime in UTC.
+
+    - deadline_str: 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS'
+    - tz_name: timezone name like 'UTC' or 'Asia/Shanghai'. If None or invalid, treat as UTC.
+
+    Returns (deadline_dt_utc, original_tz_name)
+    """
+    # Try ISO formats first (may include timezone offsets)
+    dt = None
+    tz_used = 'UTC'
+    try:
+        iso_str = deadline_str
+        # Normalize trailing Z to +00:00 for fromisoformat
+        if iso_str.endswith('Z'):
+            iso_str = iso_str[:-1] + '+00:00'
+        # fromisoformat handles 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', 'YYYY-MM-DDTHH:MM:SS+08:00', etc.
+        try:
+            dt = datetime.fromisoformat(iso_str)
+        except Exception:
+            # Try with space separator
+            if ' ' in deadline_str and 'T' not in deadline_str:
+                try:
+                    dt = datetime.fromisoformat(deadline_str)
+                except Exception:
+                    dt = None
+    except Exception:
+        dt = None
+
+    # If fromisoformat didn't parse, try common strptime patterns including minute precision
+    if dt is None:
+        patterns = ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d']
+        for p in patterns:
+            try:
+                dt = datetime.strptime(deadline_str, p)
+                break
+            except Exception:
+                dt = None
+
+    if dt is None:
+        # Could not parse
+        raise ValueError(f"Unrecognized deadline format: {deadline_str}")
+
+    # If parsed datetime has tzinfo (from ISO with offset), use it. Otherwise attach tz_name or UTC.
+    if dt.tzinfo is not None:
+        # Has tzinfo already (offset aware)
+        try:
+            # Convert to UTC for storage
+            dt_utc = dt.astimezone(timezone.utc)
+            # Derive a UTC±HH:MM style name from offset
+            try:
+                offset = dt.utcoffset()
+                if offset is None:
+                    tz_used = 'UTC'
+                else:
+                    total_seconds = int(offset.total_seconds())
+                    sign = '+' if total_seconds >= 0 else '-'
+                    total_seconds = abs(total_seconds)
+                    off_h = total_seconds // 3600
+                    off_m = (total_seconds % 3600) // 60
+                    tz_used = f"UTC{sign}{off_h:02d}:{off_m:02d}"
+            except Exception:
+                tz_used = 'UTC'
+            return dt_utc, tz_used
+        except Exception:
+            # Fallback to treating as UTC
+            return dt.replace(tzinfo=timezone.utc), 'UTC'
+
+    # No tzinfo on parsed dt -> attach tz from tz_name if possible
+    tz_obj = None
+    # Accept timezone names like 'Asia/Shanghai' via ZoneInfo, or UTC offsets like 'UTC-12', 'AoE'
+    if tz_name:
+        # Handle 'AoE' (Anywhere on Earth) - treat as UTC-12
+        if tz_name.upper() == 'AOE':
+            from datetime import timedelta
+            tz_obj = timezone(timedelta(hours=-12))
+            tz_used = 'UTC-12:00'
+        # If tz_name is an explicit UTC offset like 'UTC-12' or 'UTC+08', parse it
+        elif isinstance(tz_name, str) and tz_name.upper().startswith('UTC') and (len(tz_name) > 3) and (tz_name[3] in ['+', '-']):
+            # parse offset portion (e.g. '-12' or '+08')
+            off = tz_name[3:]
+            # normalize to +HH:MM or -HH:MM
+            if ':' not in off:
+                sig = off[0] if off and off[0] in ['+', '-'] else '+'
+                digits = off[1:] if sig in off else off
+                # ensure two-digit hour
+                if digits.isdigit():
+                    if len(digits) == 1:
+                        hh_part = f"0{digits}"
+                        mm_part = '00'
+                    elif len(digits) == 2:
+                        hh_part = digits
+                        mm_part = '00'
+                    elif len(digits) == 4:
+                        # e.g. 0830 -> 08:30
+                        hh_part = digits[0:2]
+                        mm_part = digits[2:4]
+                    else:
+                        # unexpected, fallback to '00'
+                        hh_part = digits[:2].zfill(2)
+                        mm_part = '00'
+                    off = f"{sig}{hh_part}:{mm_part}"
+                else:
+                    # unexpected format, keep as-is which will likely fail later
+                    off = off
+            # now off should be like +HH:MM or -HH:MM
+            sign = 1 if off[0] == '+' else -1
+            hh = int(off[1:3])
+            mm = int(off[4:6]) if ':' in off else 0
+            from datetime import timedelta
+            tz_obj = timezone(timedelta(hours=sign * hh, minutes=sign * mm))
+            tz_used = f"UTC{off}"
+        # Try ZoneInfo if not already parsed as explicit UTC offset
+        elif ZoneInfo is not None:
+            try:
+                tz_obj = ZoneInfo(tz_name)
+                tz_used = tz_name
+            except Exception:
+                tz_obj = None
+                # keep tz_used as whatever was set (likely 'UTC')
+
+    if tz_obj is None:
+        tz_obj = timezone.utc
+        tz_used = 'UTC'
+
+    try:
+        dt_local = dt.replace(tzinfo=tz_obj)
+        dt_utc = dt_local.astimezone(timezone.utc)
+    except Exception:
+        dt_utc = dt.replace(tzinfo=timezone.utc)
+        tz_used = 'UTC'
+
+    return dt_utc, tz_used
+
+
 class PaperWorker(QThread):
     """Background thread for fetching paper deadline information"""
     data_ready = pyqtSignal(list)  # Signal to emit deadline data
@@ -89,18 +232,12 @@ class PaperWorker(QThread):
                         deadline_str = timeline_item.get('deadline')
                         if deadline_str and deadline_str != 'TBD':
                             try:
-                                # Parse deadline
-                                if ' ' in deadline_str:
-                                    deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
-                                else:
-                                    deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d')
-                                
-                                # Convert to UTC (assuming deadlines are in their timezone)
-                                # For simplicity, treat as UTC for now
-                                deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                                
+                                # Parse deadline and attach timezone if provided in conf_year
+                                tz_name = conf_year.get('timezone', 'UTC')
+                                deadline_dt_utc, tz_used = _parse_deadline_with_timezone(deadline_str, tz_name)
+
                                 # Check if deadline is in the future or if we show past deadlines
-                                days_until = (deadline_dt - now).days
+                                days_until = (deadline_dt_utc - now).days
                                 include_deadline = (days_until >= 0) or SHOW_PAST_DEADLINES
                                 
                                 if include_deadline:
@@ -117,9 +254,9 @@ class PaperWorker(QThread):
                                     deadline_info = {
                                         'title': conf['title'],
                                         'year': conf_year['year'],
-                                        'deadline': deadline_dt,
+                                        'deadline': deadline_dt_utc,
                                         'days_until': days_until,
-                                        'timezone': conf_year.get('timezone', 'UTC'),
+                                        'timezone': tz_used,
                                         'place': conf_year.get('place', ''),
                                         'link': conf_year.get('link', ''),
                                         'rank': conf_rank,
@@ -318,7 +455,51 @@ class PaperDeadline(DesktopWidget):
             
             time_str = f"{days}d {hours:02d}h {minutes:02d}m {seconds:02d}s"
         
-        deadline_str = deadline_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        # Display deadline in the data-source timezone as UTC±HH:MM (use original timezone if available)
+        orig_tz = deadline.get('timezone', 'UTC')
+        deadline_str = None
+        try:
+            # If orig_tz is like 'UTC+08:00' or 'UTC', use that offset directly
+            if isinstance(orig_tz, str) and orig_tz.upper().startswith('UTC') and (orig_tz == 'UTC' or orig_tz[3] in ['+', '-']):
+                # Convert UTC datetime to offset-aware display using the offset
+                # If orig_tz == 'UTC', offset is +00:00
+                if orig_tz == 'UTC':
+                    offset_str = '+00:00'
+                else:
+                    offset_str = orig_tz[3:]
+                # Compute local time by applying offset
+                sign = 1 if offset_str[0] == '+' else -1
+                hh = int(offset_str[1:3])
+                mm = int(offset_str[4:6])
+                total_minutes = sign * (hh * 60 + mm)
+                local_dt = deadline_dt + timezone.utc.utcoffset(deadline_dt)  # keep as UTC base
+                # Apply offset
+                from datetime import timedelta
+                local_dt = (deadline_dt + timedelta(minutes=total_minutes)).replace(tzinfo=None)
+                deadline_str = f"{local_dt.strftime('%Y-%m-%d %H:%M:%S')} (UTC{offset_str})"
+            else:
+                # Try to resolve orig_tz via zoneinfo if available
+                if ZoneInfo is not None:
+                    try:
+                        tz_obj = ZoneInfo(orig_tz)
+                        local_dt = deadline_dt.astimezone(tz_obj)
+                        # Format offset as +HH:MM
+                        offset = local_dt.utcoffset() or timezone.utc.utcoffset(local_dt)
+                        total_seconds = int(offset.total_seconds())
+                        sign = '+' if total_seconds >= 0 else '-'
+                        total_seconds = abs(total_seconds)
+                        off_h = total_seconds // 3600
+                        off_m = (total_seconds % 3600) // 60
+                        offset_str = f"{sign}{off_h:02d}:{off_m:02d}"
+                        deadline_str = f"{local_dt.strftime('%Y-%m-%d %H:%M:%S')} (UTC{offset_str})"
+                    except Exception:
+                        # Fallback
+                        deadline_str = deadline_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                else:
+                    # zoneinfo unavailable -> show UTC time
+                    deadline_str = deadline_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        except Exception:
+            deadline_str = deadline_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
         rank = format_ccf_rank(deadline['rank'])
         place = deadline['place']
         
@@ -373,36 +554,31 @@ class PaperDeadline(DesktopWidget):
                                 deadline_str = timeline_item.get('deadline')
                                 if deadline_str and deadline_str != 'TBD':
                                     try:
-                                        # Parse deadline
-                                        if ' ' in deadline_str:
-                                            deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
-                                        else:
-                                            deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d')
-                                        
-                                        # Convert to UTC (assuming deadlines are in their timezone)
-                                        deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                                        
+                                        # Parse deadline with timezone information if available
+                                        tz_name = conf_year.get('timezone', 'UTC')
+                                        deadline_dt_utc, tz_used = _parse_deadline_with_timezone(deadline_str, tz_name)
+
                                         # Check if deadline is in the future or if we show past deadlines
-                                        days_until = (deadline_dt - now).days
+                                        days_until = (deadline_dt_utc - now).days
                                         include_deadline = (days_until >= 0) or SHOW_PAST_DEADLINES
-                                        
+
                                         if include_deadline:
                                             # Apply rank filter
                                             conf_rank = conf.get('rank', {}).get('ccf', 'N')
                                             if FILTER_BY_RANK and conf_rank not in FILTER_BY_RANK:
                                                 continue
-                                            
+
                                             # Apply sub filter
                                             conf_sub = conf.get('sub', '')
                                             if FILTER_BY_SUB and conf_sub not in FILTER_BY_SUB:
                                                 continue
-                                            
+
                                             deadline_info = {
                                                 'title': conf['title'],
                                                 'year': conf_year['year'],
-                                                'deadline': deadline_dt,
+                                                'deadline': deadline_dt_utc,
                                                 'days_until': days_until,
-                                                'timezone': conf_year.get('timezone', 'UTC'),
+                                                'timezone': tz_used,
                                                 'place': conf_year.get('place', ''),
                                                 'link': conf_year.get('link', ''),
                                                 'rank': conf_rank,
