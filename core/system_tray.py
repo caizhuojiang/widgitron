@@ -93,5 +93,12 @@ class SystemTrayManager:
         """Clean up system tray resources"""
         if self.tray_icon:
             self.tray_icon.stop()
-        if self.tray_thread and self.tray_thread.is_alive():
+        
+        # Only join if we are not in the tray thread to avoid deadlock
+        if self.tray_thread and self.tray_thread.is_alive() and threading.current_thread() != self.tray_thread:
             self.tray_thread.join(timeout=1.0)
+
+    def quit_application(self):
+        """Quit the application"""
+        self.cleanup()
+        QApplication.instance().quit()

@@ -9,39 +9,80 @@ import os
 import sys
 import shutil
 import subprocess
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+def ensure_icon_exists():
+    """Ensure .ico file exists, convert from .png if needed"""
+    ico_path = "icons/widgitron.ico"
+    png_path = "icons/widgitron.png"
+    
+    if os.path.exists(ico_path):
+        return True
+        
+    if not os.path.exists(png_path):
+        print(f"Warning: Icon source {png_path} not found")
+        return False
+        
+    if Image is None:
+        print("Warning: Pillow not installed, cannot convert icon. Please install it: pip install Pillow")
+        return False
+
+    try:
+        print(f"Converting {png_path} to {ico_path}...")
+        img = Image.open(png_path)
+        icon_sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        img.save(ico_path, format='ICO', sizes=icon_sizes)
+        print("Icon conversion successful")
+        return True
+    except Exception as e:
+        print(f"Error converting icon: {e}")
+        return False
 
 def create_exe():
-    """Create executable with pyinstaller"""
+    """Create executable with Nuitka"""
     try:
+        print("Checking for Nuitka...")
+        try:
+            import nuitka
+        except ImportError:
+            print("Nuitka not found. Installing...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "nuitka"])
+
+        # Ensure icon exists
+        ensure_icon_exists()
+
         print("Cleaning previous build files...")
         
         # Clean up previous build
-        if os.path.exists("build"):
-            shutil.rmtree("build")
-        if os.path.exists("widgitron.spec"):
-            os.remove("widgitron.spec")
-        if os.path.exists("widgitron.exe"):
-            os.remove("widgitron.exe")
+        cleanup_build_files()
         
-        print("Creating executable with pyinstaller...")
+        print("Creating executable with Nuitka (this may take a while)...")
         
-        # Run pyinstaller
+        # Run Nuitka
+        # Note: Nuitka requires a C compiler (like MinGW or MSVC)
+        # It will ask to download one if not found
         cmd = [
-            sys.executable, "-m", "PyInstaller",
-            "--onefile",  # Single exe file
-            "--windowed",  # No console window for GUI app
-            "--icon", "icons/widgitron.png",  # Add icon to exe
-            "--name", "widgitron",
-            "--distpath", ".",  # Output to current directory
-            "--add-data", "icons;icons",  # Include icons
-            "--add-data", "configs;configs",  # Include configs
+            sys.executable, "-m", "nuitka",
+            "--onefile",
+            "--enable-plugin=pyqt5",
+            "--include-package=widgets",
+            "--output-dir=.",
+            "--output-filename=widgitron.exe",
+            "--include-data-dir=icons=icons", # Include icons for __file__ relative paths
+            "--windows-disable-console", # Enable console for debugging
+            "--assume-yes-for-downloads", # Auto download ccache/dependency walker if needed
+            "--windows-icon-from-ico=icons/widgitron.ico", # Set application icon
             "widgitron.py"
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        print(f"Running command: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=False) # Show output to see progress
         
         if result.returncode != 0:
-            print(f"Pyinstaller failed: {result.stderr}")
+            print("Nuitka build failed.")
             return False
         
         print("Executable created successfully!")
@@ -78,14 +119,6 @@ def setup_bin_directory():
                 shutil.rmtree(configs_dest)
             shutil.copytree("configs", configs_dest)
             print(f"Copied configs to {configs_dest}")
-        
-        # Copy icons directory
-        if os.path.exists("icons"):
-            icons_dest = os.path.join(bin_dir, "icons")
-            if os.path.exists(icons_dest):
-                shutil.rmtree(icons_dest)
-            shutil.copytree("icons", icons_dest)
-            print(f"Copied icons to {icons_dest}")
         
         return True
         
@@ -134,20 +167,26 @@ def cleanup_build_files():
     try:
         print("Cleaning up build files...")
         
-        # Remove build directory
+        # Remove build directory (PyInstaller)
         if os.path.exists("build"):
             shutil.rmtree("build")
-            print("Removed build directory")
         
-        # Remove spec file
+        # Remove spec file (PyInstaller)
         if os.path.exists("widgitron.spec"):
             os.remove("widgitron.spec")
-            print("Removed widgitron.spec")
-        
-        # Remove exe file (root directory)
+            
+        # Remove Nuitka build directories
+        if os.path.exists("widgitron.build"):
+            shutil.rmtree("widgitron.build")
+        if os.path.exists("widgitron.onefile-build"):
+            shutil.rmtree("widgitron.onefile-build")
+        if os.path.exists("widgitron.dist"):
+            shutil.rmtree("widgitron.dist")
+            
+        # Remove exe file (root directory) - we keep the one in bin/
         if os.path.exists("widgitron.exe"):
             os.remove("widgitron.exe")
-            print("Removed widgitron.exe")
+            print("Removed root widgitron.exe")
         
         return True
         
