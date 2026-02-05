@@ -31,6 +31,15 @@
                 "key_file": "~/.ssh/id_rsa"
             },
             "comment": "Server accessed through jump host"
+        },
+        {
+            "host": "slurm-login.example.com",
+            "user": "username",
+            "password": null,
+            "key_file": "~/.ssh/id_rsa",
+            "port": 22,
+            "type": "slurm",
+            "comment": "SLURM cluster login node"
         }
     ],
     "update_interval": 1,

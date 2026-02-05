@@ -140,8 +140,9 @@ def add_exe_to_startup():
         # First, try to remove existing entry
         remove_from_startup()
         
-        # Command to run: just the exe path
-        command = f'"{exe_path}"'
+        # Command to run: Use cmd /c to set working directory before launching exe
+        # This ensures the exe runs with bin/ as working directory, so it can find configs/
+        command = f'cmd /c "cd /d "{bin_dir}" && "{exe_path}""'
         
         # Open the registry key for startup programs
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
@@ -215,31 +216,49 @@ def remove_from_startup():
         print(f"Error removing from startup: {e}")
         return False
 
-def main():
+def main(skip_build=False):
     """Main function"""
-    print("Setting up Widgitron executable and startup...")
-    
-    # Create exe
-    if not create_exe():
-        return
-    
-    # Setup bin directory
-    if not setup_bin_directory():
-        return
-    
-    # Clean up build files
-    if not cleanup_build_files():
-        return
-    
-    # Add to startup
-    if not add_exe_to_startup():
-        return
-    
-    print("\nSetup complete! Widgitron exe is ready and added to startup.")
-    print("Restart your computer to test auto-start.")
+    if skip_build:
+        print("Skipping build, only adding to startup...")
+        
+        # Just add to startup
+        if not add_exe_to_startup():
+            return
+        
+        print("\nWidgitron has been added to startup.")
+        print("Restart your computer to test auto-start.")
+    else:
+        print("Setting up Widgitron executable and startup...")
+        
+        # Create exe
+        if not create_exe():
+            return
+        
+        # Setup bin directory
+        if not setup_bin_directory():
+            return
+        
+        # Clean up build files
+        if not cleanup_build_files():
+            return
+        
+        # Add to startup
+        if not add_exe_to_startup():
+            return
+        
+        print("\nSetup complete! Widgitron exe is ready and added to startup.")
+        print("Restart your computer to test auto-start.")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "remove":
-        remove_from_startup()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "remove":
+            remove_from_startup()
+        elif sys.argv[1] == "startup" or sys.argv[1] == "--skip-build":
+            main(skip_build=True)
+        else:
+            print("Usage:")
+            print("  python add_startup.py           - Build exe and add to startup")
+            print("  python add_startup.py startup   - Only add to startup (skip build)")
+            print("  python add_startup.py remove    - Remove from startup")
     else:
         main()

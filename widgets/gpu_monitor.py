@@ -11,6 +11,7 @@ import paramiko
 import os
 import json
 import time
+import re
 
 from core.desktop_widget import DesktopWidget
 
@@ -213,9 +214,13 @@ class GPUWorker(QThread):
             
             # Connect with password or key
             port = server.get('port', 22)
-            if server.get('key_file') and os.path.exists(server['key_file']):
+            key_file = server.get('key_file')
+            if key_file:
+                key_file = os.path.expanduser(key_file)
+
+            if key_file and os.path.exists(key_file):
                 ssh.connect(server['host'], port=port, username=server['user'], 
-                           key_filename=server['key_file'], timeout=10)
+                           key_filename=key_file, timeout=10)
             else:
                 default_key = os.path.expanduser('~/.ssh/id_rsa')
                 if os.path.exists(default_key):
@@ -248,7 +253,206 @@ class GPUWorker(QThread):
         """Update the polling interval (called when settings change)"""
         self.update_interval = interval
     
+    def _get_slurm_info(self, server):
+        """Get GPU info from Slurm cluster"""
+        print(f"[DEBUG] Fetching Slurm info for {server['host']}")
+        ssh = self._get_ssh_connection(server)
+        if ssh is None:
+            err = self.connection_errors.get(get_server_id(server), 'Connection failed')
+            print(f"[DEBUG] SSH connection failed for {server['host']}: {err}")
+            return {'gpu_list': [], 'gpu_info': f"Error: {err}"}
+        
+        # Combined command to get partition AND node info
+        # We use a separator to split the output later
+        sep = "___PARTITION_NODE_SPLIT___"
+        cmd = f"scontrol show partition -o; echo '{sep}'; scontrol show node -o"
+        
+        try:
+            stdin, stdout, stderr = ssh.exec_command(cmd, timeout=10)
+            full_output = stdout.read().decode('utf-8').strip()
+            stderr_output = stderr.read().decode('utf-8').strip()
+            
+            if stderr_output:
+                print(f"[DEBUG] Slurm command stderr: {stderr_output}")
+
+            gpu_list = []
+            valid_partitions = set()
+
+            if full_output:
+                parts = full_output.split(sep)
+                part_output = parts[0].strip() if len(parts) > 0 else ""
+                node_output = parts[1].strip() if len(parts) > 1 else ""
+
+                # 1. Parse Partitions first to identify drained ones
+                if part_output:
+                    lines = part_output.split('\n')
+                    for line in lines:
+                        try:
+                            # Parse PartitionName
+                            name_match = re.search(r'PartitionName=(\S+)', line)
+                            if not name_match: continue
+                            p_name = name_match.group(1)
+                            
+                            # Parse State
+                            state_match = re.search(r'State=(\S+)', line)
+                            state = state_match.group(1) if state_match else "UNKNOWN"
+                            
+                            # Log drained partitions
+                            if 'DRAIN' in state or 'INACTIVE' in state or 'DOWN' in state:
+                                print(f"[DEBUG] Ignoring drained partition: {p_name} (State={state})")
+                                continue
+                                
+                            valid_partitions.add(p_name)
+                        except Exception:
+                            continue
+
+                # 2. Parse Nodes
+                if node_output:
+                    lines = node_output.split('\n')
+                    
+                    # Debug: print first few lines with 'gpu' in them to understand format
+                    printed_debug = 0
+                    for line in lines:
+                        if 'gpu' in line.lower() and printed_debug < 2:
+                            print(f"[DEBUG] Sample GPU line: {line[:100]}...")
+                            printed_debug += 1
+
+                    for line in lines:
+                        try:
+                            # Find NodeName
+                            node_match = re.search(r'NodeName=(\S+)', line)
+                            if not node_match: continue
+                            node_name = node_match.group(1)
+
+                            # Find Partitions
+                            partitions = []
+                            partition_match = re.search(r'Partitions=([^ ]+)', line)
+                            if partition_match:
+                                raw_partitions = partition_match.group(1).split(',')
+                                # Filter partitions - only keep valid ones
+                                partitions = [p for p in raw_partitions if p in valid_partitions]
+
+                            # If node has no valid partitions, skip it completely?
+                            # Or maybe just don't show it? 
+                            # If we want to filter out drained *partitions*, we should parse GPUs 
+                            # but only associate them with valid partitions. 
+                            # If partitions list is empty after filtering, that implies this node 
+                            # only belongs to drained partitions, so we can probably skip it for the UI 
+                            # (since the UI groups by partition).
+                            # However, if we want to show a "Total", maybe we should keep it?
+                            # Users request was "filter out drain partition", so let's assume if it's not in a valid partition, skip.
+                            if not partitions:
+                                continue
+
+                            gpu_count = 0
+
+                            gpu_type = "GPU"
+
+                            # Strategy 1: Check Gres=...
+                            gres_match = re.search(r'Gres=([^ ]+)', line)
+                            if gres_match:
+                                gres_str = gres_match.group(1)
+                                if 'gpu' in gres_str and gres_str != '(null)':
+                                    # Format usually: gpu:type:count or gpu:count
+                                    parts = gres_str.split(':')
+                                    # Try to find count (last digit)
+                                    for p in reversed(parts):
+                                        if p.isdigit():
+                                            gpu_count = int(p)
+                                            break
+                                    # Try to find type
+                                    if len(parts) > 2:
+                                        gpu_type = parts[1]
+                                    elif len(parts) == 2 and not parts[1].isdigit():
+                                        gpu_type = parts[1]
+                            
+                            # Strategy 2: Check CfgTRES=... if Gres failed
+                            if gpu_count == 0:
+                                cfg_match = re.search(r'CfgTRES=([^ ]+)', line)
+                                if cfg_match:
+                                    cfg_str = cfg_match.group(1)
+                                    # Look for gres/gpu=X or gres/gpu:type=X
+                                    # Simple case: gres/gpu=4
+                                    gpus_match = re.search(r'gres/gpu=(\d+)', cfg_str)
+                                    if gpus_match:
+                                        gpu_count = int(gpus_match.group(1))
+
+                            if gpu_count == 0: continue
+
+                            # Find Allocated GPUs
+                            alloc_match = re.search(r'AllocTRES=([^ ]+)', line)
+                            alloc_count = 0
+                            if alloc_match:
+                                alloc_str = alloc_match.group(1)
+                                # Look for gres/gpu=X
+                                # AllocTRES=...gres/gpu=2...
+                                alloc_gpu_match = re.search(r'gres/gpu=(\d+)', alloc_str)
+                                if alloc_gpu_match:
+                                    alloc_count = int(alloc_gpu_match.group(1))
+                            
+                            # Generate entries for each GPU
+                            for i in range(gpu_count):
+                                is_allocated = i < alloc_count
+                                gpu_list.append({
+                                    'name': f"{node_name}",
+                                    'index': i,
+                                    'mem_used': 0,
+                                    'mem_total': 0,
+                                    'util': 100 if is_allocated else 0,
+                                    'display_type': gpu_type,
+                                    'partitions': partitions
+                                })
+                        except Exception:
+                            continue 
+            
+            # Helper to check partition filtering
+            def get_gpu_partition(g):
+                return g['partitions'][0] if g['partitions'] else 'Unknown'
+
+            # Partition stats
+            partition_stats = {}
+            for g in gpu_list:
+                # Count stats for each partition the GPU belongs to (GPU is shared across partitions on the node)
+                for p in g['partitions']:
+                    if p not in partition_stats:
+                        partition_stats[p] = {'free': 0, 'total': 0}
+                    partition_stats[p]['total'] += 1
+                    if g['util'] == 0:
+                        partition_stats[p]['free'] += 1
+
+            # Format summary info with partition details
+            # e.g. "Cluster: 100/486 Free\nPart1: 10/20, Part2: 90/466"
+            free_gpus = sum(1 for g in gpu_list if g['util'] == 0)
+            total_gpus = len(gpu_list)
+            
+            summary_parts = [f"Total: {free_gpus}/{total_gpus} Free"]
+            
+            # Sort stats by partition name
+            for p_name in sorted(partition_stats.keys()):
+                stats = partition_stats[p_name]
+                summary_parts.append(f"{p_name}: {stats['free']}/{stats['total']}")
+            
+            # Join with <br> for HTML display in existing tooltips if needed, but mainly for the UI to parse
+            gpu_info = " | ".join(summary_parts)
+            
+            # Sort by node name
+            gpu_list.sort(key=lambda x: x['name'])
+            
+            print(f"[DEBUG] Slurm info fetched: {len(gpu_list)} GPUs found. Partitions: {list(partition_stats.keys())}")
+            return {
+                'gpu_list': gpu_list,
+                'gpu_info': gpu_info,
+                'partition_stats': partition_stats
+            }
+
+        except Exception as e:
+            print(f"[DEBUG] Slurm info fetch failed: {str(e)}")
+            return {'gpu_list': [], 'gpu_info': f"Error: {str(e)}"}
+
     def get_gpu_info(self, server):
+        if server.get('type') == 'slurm':
+            return self._get_slurm_info(server)
+
         try:
             # Handle localhost directly without SSH
             if server['host'] in ['localhost', '127.0.0.1']:
@@ -337,6 +541,9 @@ class GPUMonitor(DesktopWidget):
         config_path = 'configs/gpu_monitor.json'
         super().__init__(WIDGET_SIZE, config_path=config_path)
         self.setWindowTitle("GPU Monitor")
+
+        # Load fresh server list from config
+        self.servers = self.config.get('servers', [])
         
         # Add this instance to active instances
         GPUMonitor.active_instances.append(self)
@@ -350,7 +557,7 @@ class GPUMonitor(DesktopWidget):
         self.server_grid_containers = {}  # For compact style
         
         # Store display style
-        self.display_style = DISPLAY_STYLE
+        self.display_style = self.config.get('display_style', 'list')
         
         # Create UI based on display style
         self._create_display_ui()
@@ -358,7 +565,7 @@ class GPUMonitor(DesktopWidget):
         self.content_container.setLayout(self.layout)
         self.content_container.setStyleSheet("background-color: rgba(0, 0, 0, 100);")
         
-        self.last_active_times = {get_server_id(server): time.time() for server in SERVERS}
+        self.last_active_times = {get_server_id(server): time.time() for server in self.servers}
         self.monitoring = True
         self.is_topmost = False  # Start not topmost
         self.is_locked = True  # Start locked
@@ -366,7 +573,7 @@ class GPUMonitor(DesktopWidget):
         self.resize_edge = None  # For resizing
         
         # Create GPU worker thread
-        self.worker = GPUWorker(SERVERS)
+        self.worker = GPUWorker(self.servers)
         self.worker.data_ready.connect(self.update_gpu_display)
         self.worker.start()
         
@@ -388,27 +595,49 @@ class GPUMonitor(DesktopWidget):
         
         if self.display_style == 'compact':
             # Compact grid style
-            for server in SERVERS:
+            for server in self.servers:
                 server_id = get_server_id(server)
                 
                 # Create container for this server's GPUs
-                from PyQt5.QtWidgets import QWidget, QGridLayout
+                from PyQt5.QtWidgets import QWidget, QGridLayout, QVBoxLayout, QHBoxLayout
                 container = QWidget()
-                grid = QGridLayout(container)
-                grid.setSpacing(5)
-                grid.setContentsMargins(5, 5, 5, 5)
+                
+                # New Structure: VBox holding Label + Content Area
+                # content_area will hold either the Grid (flat view) or VBox (partition view)
+                
+                container_layout = QVBoxLayout(container)
+                container_layout.setContentsMargins(5, 5, 5, 5)
+                container_layout.setSpacing(5)
                 
                 # Server name label
                 server_name = QLabel(server_id)
                 server_name.setFont(QFont("Arial", self.font_size))
                 server_name.setStyleSheet("color: white; font-weight: bold;")
-                grid.addWidget(server_name, 0, 0, 1, 4)
+                container_layout.addWidget(server_name)
+                
+                # Content Area
+                content_area = QWidget()
+                content_layout = QVBoxLayout(content_area) # Default to VBox, can be anything
+                content_layout.setContentsMargins(0, 0, 0, 0)
+                container_layout.addWidget(content_area)
+                
+                # Initial Setup: Flat Grid (Standard)
+                # We create a widget for the grid and add it to content_area
+                grid_widget = QWidget()
+                grid = QGridLayout(grid_widget)
+                grid.setSpacing(5)
+                grid.setContentsMargins(0, 0, 0, 0)
+                content_layout.addWidget(grid_widget)
                 
                 # GPU cards (4 per row)
                 self.server_grid_containers[server_id] = {
                     'container': container,
+                    'label': server_name,
+                    'content_area': content_area,
+                    'grid_widget': grid_widget, # The widget holding the grid
                     'grid': grid,
-                    'gpu_cards': []
+                    'gpu_cards': [],
+                    'mode': 'flat'
                 }
                 
                 # Create placeholder GPU cards
@@ -423,18 +652,18 @@ class GPUMonitor(DesktopWidget):
                         "font-size: 10px;"
                     )
                     gpu_card.hide()
-                    row = (i // 4) + 1
+                    row = (i // 4)
                     col = i % 4
                     grid.addWidget(gpu_card, row, col)
                     self.server_grid_containers[server_id]['gpu_cards'].append(gpu_card)
                 
                 # Add stretch rows/columns
-                grid.setRowStretch(3, 1)  # Add stretch to the last row
-                container.setLayout(grid)
+                grid.setRowStretch(3, 1)
+                
                 self.layout.addWidget(container)
         else:
             # List style (original)
-            for server in SERVERS:
+            for server in self.servers:
                 server_id = get_server_id(server)
                 server_label = QLabel(f"{server_id}: Initializing...")
                 server_label.setFont(QFont("Arial", self.font_size))
@@ -506,59 +735,251 @@ class GPUMonitor(DesktopWidget):
     
     def _update_compact_display(self, gpu_data):
         """Update compact grid style display"""
+        from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGridLayout, QLabel
+        
         for host, data in gpu_data.items():
             if host in self.server_grid_containers:
                 gpu_list = data.get('gpu_list', [])
-                gpu_cards = self.server_grid_containers[host]['gpu_cards']
+                container_data = self.server_grid_containers[host]
                 
-                # Update GPU cards
-                for i, gpu in enumerate(gpu_list):
-                    if i < len(gpu_cards):
-                        card = gpu_cards[i]
-                        
-                        # Calculate memory in GB
-                        mem_used_gb = gpu['mem_used'] / 1024
-                        mem_total_gb = gpu['mem_total'] / 1024
-                        util = gpu['util']
-                        
-                        # Determine color based on utilization
-                        if util < 10:
-                            bg_color = "rgba(34, 139, 34, 200)"  # Green
-                        elif util < 50:
-                            bg_color = "rgba(255, 165, 0, 200)"  # Orange
-                        else:
-                            bg_color = "rgba(220, 20, 60, 200)"  # Red
-                        
-                        # Get simplified GPU name
-                        gpu_name = simplify_gpu_name(gpu['name'])
-                        
-                        # Format text
-                        text = f"<b>{gpu_name}</b><br>"
-                        text += f"{mem_used_gb:.1f}G/{mem_total_gb:.1f}G<br>"
-                        text += f"{util:.0f}%"
-                        
-                        # Calculate dynamic font size based on widget font size
-                        # Use a slightly smaller size than the base for compact display
-                        card_font_size = self.font_size + 6
-                        
-                        card.setTextFormat(Qt.RichText)
-                        card.setText(text)
-                        card.setStyleSheet(
-                            f"background-color: {bg_color}; "
-                            "border: 1px solid gray; "
-                            "color: white; "
-                            f"font-size: {card_font_size}px; "
-                            "font-weight: bold;"
-                        )
-                        card.show()
+                # Check if we need partitioned view
+                has_partitions = 'partition_stats' in data and len(data['partition_stats']) > 0
+                target_mode = 'partitioned' if has_partitions else 'flat'
+                current_mode = container_data.get('mode', 'flat')
                 
-                # Hide unused cards
-                for i in range(len(gpu_list), len(gpu_cards)):
-                    gpu_cards[i].hide()
+                content_area = container_data['content_area']
+                
+                # Handle Mode Switching
+                if current_mode != target_mode:
+                    # Clear Content Area
+                    layout = content_area.layout()
+                    if layout:
+                        # Clear old widgets
+                        while layout.count():
+                            child = layout.takeAt(0)
+                            if child.widget():
+                                child.widget().deleteLater()
+                    
+                    if target_mode == 'partitioned':
+                        # Setup for Partitioned View
+                        # Content Area already has VBox, we will add partition widgets to it
+                        container_data['partition_widgets'] = {}
+                        container_data['mode'] = 'partitioned'
+                        # Reset Grid/List refs to avoid confusion but keep top-level container structure
+                        # We don't use 'grid' or 'gpu_cards' in this mode directly
+                        
+                    else:
+                        # Setup for Flat View (Standard)
+                        # Re-create the Grid Widget
+                        grid_widget = QWidget()
+                        grid = QGridLayout(grid_widget)
+                        grid.setSpacing(5)
+                        grid.setContentsMargins(0, 0, 0, 0)
+                        layout.addWidget(grid_widget)
+                        
+                        container_data['grid_widget'] = grid_widget
+                        container_data['grid'] = grid
+                        container_data['gpu_cards'] = [] # Reset cards
+                        container_data['mode'] = 'flat'
+
+                # --- Update Logic based on Mode ---
+                
+                if target_mode == 'partitioned':
+                    # Partitioned Display (Dense Dot Map split by Partition)
+                    stats = data['partition_stats']
+                    partition_widgets = container_data.get('partition_widgets', {})
+                    layout = content_area.layout()
+                    
+                    # Update Main Label
+                    free_count = sum(1 for g in gpu_list if g['util'] == 0)
+                    container_data['label'].setText(f"{host} ({free_count}/{len(gpu_list)} Free)")
+                    
+                    # 1. Ensure widgets exist for all partitions
+                    sorted_partitions = sorted(stats.keys())
+                    
+                    # First, remove obsolete partitions
+                    for p_name in list(partition_widgets.keys()):
+                        if p_name not in stats:
+                            w = partition_widgets[p_name]['widget']
+                            layout.removeWidget(w)
+                            w.deleteLater()
+                            del partition_widgets[p_name]
+                    
+                    # Add/Update Partitions
+                    for p_name in sorted_partitions:
+                        if p_name not in partition_widgets:
+                            # Create new partition block
+                            p_widget = QWidget()
+                            p_layout = QVBoxLayout(p_widget)
+                            p_layout.setContentsMargins(0, 5, 0, 5)
+                            p_layout.setSpacing(2)
+                            
+                            # Header
+                            p_header = QLabel()
+                            p_header.setStyleSheet("color: #DDD; font-weight: bold; font-size: 11px;")
+                            p_layout.addWidget(p_header)
+                            
+                            # Dot Grid
+                            dots_widget = QWidget()
+                            dots_grid = QGridLayout(dots_widget)
+                            dots_grid.setSpacing(2)
+                            dots_grid.setContentsMargins(0, 0, 0, 0)
+                            p_layout.addWidget(dots_widget)
+                            
+                            layout.addWidget(p_widget)
+                            
+                            partition_widgets[p_name] = {
+                                'widget': p_widget,
+                                'header': p_header,
+                                'grid': dots_grid,
+                                'dots': []
+                            }
+                        
+                        # Update this partition
+                        p_data = partition_widgets[p_name]
+                        p_stats = stats[p_name]
+                        
+                        # Update text
+                        p_data['header'].setText(f"{p_name}: {p_stats['free']}/{p_stats['total']} Free")
+                        
+                        # Filter GPUs
+                        # NOTE: A GPU can be in multiple partitions. We create a dot for it in each partition it belongs to.
+                        p_gpus = [g for g in gpu_list if p_name in g.get('partitions', [])]
+                        
+                        # Update dots
+                        self._update_dots_grid(p_data['grid'], p_data['dots'], p_gpus)
+                        
+                else:
+                    # Flat Display (Standard Mode)
+                    grid = container_data['grid']
+                    gpu_cards = container_data['gpu_cards']
+                    
+                    # Normal label date
+                    free_count = sum(1 for g in gpu_list if g['util'] == 0)
+                    if len(gpu_list) > 0:
+                         container_data['label'].setText(f"{host} ({free_count}/{len(gpu_list)} Free)")
+                    else:
+                         container_data['label'].setText(host)
+
+                    # Update Cards
+                    self._update_flat_grid(grid, gpu_cards, gpu_list)
                 
                 # Update last active time
                 if gpu_list and any(gpu['util'] > 0 for gpu in gpu_list):
                     self.last_active_times[host] = time.time()
+
+    def _update_dots_grid(self, grid, dots, gpu_list):
+        """Helper to update a grid of dots"""
+        columns = 20
+        
+        # Ensure enough dots
+        while len(dots) < len(gpu_list):
+            i = len(dots)
+            dot = QLabel()
+            dot.setFixedSize(12, 12)
+            dot.setStyleSheet("background-color: gray; border-radius: 6px;")
+            
+            row = i // columns
+            col = i % columns
+            grid.addWidget(dot, row, col)
+            grid.setAlignment(dot, Qt.AlignCenter)
+            dots.append(dot)
+            
+        # Update dots
+        for i, gpu in enumerate(gpu_list):
+            if i < len(dots):
+                dot = dots[i]
+                dot.setFixedSize(12, 12)
+                
+                if gpu['util'] < 10:
+                    color = "#4CAF50" # Green
+                else:
+                    color = "#F44336" # Red
+                
+                dot.setStyleSheet(f"background-color: {color}; border-radius: 6px; border: 1px solid rgba(255,255,255,0.3);")
+                dot.setToolTip(f"{gpu['name']}\nType: {gpu.get('display_type', 'Unknown')}")
+                dot.show()
+                
+        # Hide unused
+        for i in range(len(gpu_list), len(dots)):
+            dots[i].hide()
+
+    def _update_flat_grid(self, grid, gpu_cards, gpu_list):
+        """Helper to update standard flat grid (backward compatibility logic)"""
+        # Check if we need more cards
+        while len(gpu_cards) < len(gpu_list):
+            i = len(gpu_cards)
+            gpu_card = QLabel()
+            gpu_card.setMinimumHeight(80)
+            gpu_card.setAlignment(Qt.AlignCenter)
+            gpu_card.setStyleSheet(
+                "background-color: rgba(100, 100, 100, 200); "
+                "border: 1px solid gray; "
+                "color: white; "
+                "font-size: 10px;"
+            )
+            
+            row = (i // 4)
+            col = i % 4
+            grid.addWidget(gpu_card, row, col)
+            gpu_cards.append(gpu_card)
+
+        # Update GPU cards
+        for i, gpu in enumerate(gpu_list):
+            if i < len(gpu_cards):
+                card = gpu_cards[i]
+                # Reset fixed size if any
+                card.setMinimumHeight(80)
+                card.setMinimumWidth(0)
+                card.setMaximumWidth(16777215)
+                card.setMaximumHeight(16777215)
+
+                # Calculate memory in GB
+                mem_used_gb = gpu['mem_used'] / 1024
+                mem_total_gb = gpu['mem_total'] / 1024
+                util = gpu['util']
+                
+                # Determine color based on utilization
+                if util < 10:
+                    bg_color = "rgba(34, 139, 34, 200)"  # Green
+                elif util < 50:
+                    bg_color = "rgba(255, 165, 0, 200)"  # Orange
+                else:
+                    bg_color = "rgba(220, 20, 60, 200)"  # Red
+                
+                # Get GPU name
+                if 'display_type' in gpu:
+                    gpu_name = f"{gpu['name']}<br><span style='font-size:80%'>{gpu['display_type']}</span>"
+                else:
+                    gpu_name = simplify_gpu_name(gpu['name'])
+                
+                # Format text
+                text = f"<b>{gpu_name}</b><br>"
+                
+                # Only show memory if valid (useful for NVIDIA-SMI)
+                if gpu['mem_total'] > 0:
+                    text += f"{mem_used_gb:.1f}G/{mem_total_gb:.1f}G<br>"
+                    text += f"{util:.0f}%"
+                else:
+                    status_text = "Free" if util == 0 else "Allocated"
+                    text += f"{status_text}"
+                
+                card_font_size = self.font_size + 6
+                
+                card.setTextFormat(Qt.RichText)
+                card.setText(text)
+                card.setStyleSheet(
+                    f"background-color: {bg_color}; "
+                    "border: 1px solid gray; "
+                    "color: white; "
+                    f"font-size: {card_font_size}px; "
+                    "font-weight: bold;"
+                )
+                card.show()
+        
+        # Hide unused cards
+        for i in range(len(gpu_list), len(gpu_cards)):
+            gpu_cards[i].hide()
     
     def close_widget(self):
         """Override parent close method to execute GPU monitor specific cleanup"""
