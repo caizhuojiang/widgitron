@@ -1,0 +1,32 @@
+[package]
+name = "widgitron"
+version = "1.0.0"
+description = "A modular desktop widget framework for researchers and developers"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "widgitron_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ssh2 = "0.9"
+tokio = { version = "1", features = ["full"] }
+once_cell = "1"
+log = "0.4"
+env_logger = "0.10"
+tauri-plugin-shell = "2"
+reqwest = { version = "0.12", features = ["json"] }
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+lazy_static = "1.4"
+shellexpand = "3.1"
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"

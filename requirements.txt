@@ -1,8 +1,0 @@
-paramiko
-pystray
-plyer
-Pillow
-PyQt5
-pyinstaller
-PyYAML
-requests

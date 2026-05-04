@@ -1,33 +1,37 @@
 # Widgitron
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![Python](https://img.shields.io/badge/python-3.7+-green)
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Rust](https://img.shields.io/badge/rust-1.75+-brown)
+![Tauri](https://img.shields.io/badge/tauri-2.0-blue)
+![React](https://img.shields.io/badge/react-19-blue)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
 <img src="icons/widgitron.png" alt="Widgitron Logo" width="150">
 
-**A modular desktop widget framework for researchers and developers**
+**A high-performance, modular desktop widget framework for researchers and developers.**
 
-Build AI-powered dashboards and monitoring tools with Python and PyQt5. Create beautiful, floating desktop widgets that are always accessible.
+> [!TIP]
+> Windows users can download the pre-compiled standalone executable directly from the [Releases](https://github.com/caizhuojiang/widgitron/releases) page.
 
-<img src="assets/screenshot.jpg" alt="Screenshot" width="500">
+Widgitron is a modern, cross-platform dashboard built with **Tauri**, **Rust**, and **React**. It provides a premium, glassmorphic UI for monitoring GPUs, conference deadlines, and more, with a focus on efficiency and HPC cluster compatibility.
+
+<img src="assets/screenshot.jpg" alt="Widgitron Dashboard and Widgets" width="800">
 
 ## 🗺️ Roadmap
 
 ### ✅ Completed
-- [x] Main framework setup
-- [x] GPU monitor widget
-- [x] Paper deadline widget
-- [x] Compact GPU monitor widget style
-- [x] Widget settings
+- [x] Tauri 2.0 & Rust backend migration
+- [x] Modern React-based Glassmorphism UI
+- [x] GPU monitoring (Persistent SSH)
+- [x] Slurm integration & Job ID tracking
+- [x] Paper deadline countdown widget
 
 ### 🚧 Planned
-- [ ] Paper monitoring update widget
-- [ ] Server file management widget
-- [ ] More widgets
-- [ ] Plugin system for third-party widgets
-- [ ] Widget themes and styles
-- [ ] Multi-monitor support improvements
+- [ ] Direct server file management widget
+- [ ] Integrated LLM assistant widget
+- [ ] Plugin system for community widgets
+- [ ] Advanced widget theme customization
+- [ ] Enhanced multi-monitor layout support
 
 
 ## 🚀 Quick Start
@@ -40,7 +44,7 @@ git clone https://github.com/caizhuojiang/widgitron.git
 cd widgitron
 
 # Install dependencies
-pip install -r requirements.txt
+pnpm install
 ```
 
 ### Configuration
@@ -55,35 +59,38 @@ pip install -r requirements.txt
             "key_file": "~/.ssh/id_rsa",
             "port": 22
         }
-    ],
+    ]
 }
 ```
 
-See `configs/gpu_monitor.example.json` for more options.
+See `configs/gpu_monitor.json` for more details.
 
 ### Run
 
 ```bash
-python widgitron.py
+# Development mode
+pnpm tauri dev
+
+# Build production executable
+pnpm tauri build
 ```
 
 ## 📊 Built-in Widgets
 
 ### GPU Monitor
 
-Monitor GPU usage on multiple remote servers:
-- 📡 SSH connection support
-- 🔔 Idle notifications
-- 🌐 Proxy/jump host support
+Intelligent remote GPU monitoring optimized for HPC environments:
+- 📡 **HPC Compliant**: Uses persistent SSH to minimize load on login nodes.
+- 🚀 **Slurm Support**: Real-time job tracking and Job ID management.
+- 🔔 **Smart Alerts**: Idle notifications and custom usage thresholds.
+- 🌐 **Flexible Connectivity**: Proxy and jump host support.
 
 ### Paper Deadline Monitor
 
-Track upcoming conference deadlines with countdowns:
-
-Features:
-- ⏳ Countdown (d/h/m/s)
-- 🎯 Filter settings support
-- 🔁 Auto-sort by nearest deadline
+Keep track of conference deadlines with high-precision countdowns:
+- ⏳ **Real-time Countdowns**: Precise tracking down to the second.
+- 🎯 **Smart Filtering**: Filter by conference types or research areas.
+- 🔁 **Auto-Sync**: Automatically updates and sorts by proximity.
 
 ## 🤝 Contributing
 

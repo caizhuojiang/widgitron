@@ -1,0 +1,13 @@
+{
+    "servers": [
+        {
+            "host": "localhost",
+            "port": null,
+            "user": null,
+            "password": null,
+            "key_file": null,
+            "use_slurm": null
+        }
+    ],
+    "update_interval": 1
+}

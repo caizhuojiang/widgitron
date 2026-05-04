@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-primary: #3b82f6;
+  --color-brand-secondary: #10b981;
+  --color-glass-bg: rgba(255, 255, 255, 0.1);
+  --color-glass-border: rgba(255, 255, 255, 0.2);
+}
+
+html, body, #root {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+:root {
+  --dashboard-bg: #0f172a;
+  --dashboard-text: #f1f5f9;
+  --dashboard-border: #1e293b;
+  --sidebar-bg: #020617;
+  --card-bg: #1e293b;
+  --header-bg: #0f172a;
+}
+
+.light-theme {
+  --dashboard-bg: #F8F8F8;
+  --dashboard-text: #18181b;
+  --dashboard-border: #eeeeee;
+  --sidebar-bg: #ffffff;
+  --card-bg: #ffffff;
+  --header-bg: #ffffff;
+}
+
+.light-theme main {
+  background-color: var(--dashboard-bg) !important;
+}
+
+.glass {
+  background: var(--dashboard-bg);
+  border: 1px solid var(--dashboard-border);
+  color: var(--dashboard-text);
+}
+
+.glass-card {
+  background: var(--card-bg);
+  border: 1px solid var(--dashboard-border);
+  border-radius: 16px;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+}

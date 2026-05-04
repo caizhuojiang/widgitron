@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Widgitron",
+  "version": "1.0.0",
+  "identifier": "com.evan.widgitron",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+        {
+          "label": "main",
+          "title": "Widgitron",
+          "width": 1000,
+          "height": 700,
+          "resizable": true,
+          "fullscreen": false,
+          "decorations": false,
+          "transparent": true,
+          "shadow": false
+        }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "configs/**/*"
+    ]
+  }
+}
