@@ -7,8 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use ssh2::Session;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{TrayIconBuilder};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
@@ -45,6 +44,8 @@ struct PaperConfig {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 struct AppConfig {
     theme: Option<String>, // "light" or "dark"
+    always_on_top: Option<HashMap<String, bool>>,
+    embedded: Option<HashMap<String, bool>>,
 }
 
 // --- Payload Models ---
@@ -179,6 +180,95 @@ fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
 }
 
 // --- GPU Polling Task (Persistent Workers) ---
+
+fn ssh_authenticate(sess: &mut Session, s: &ServerConfig) -> Result<(), String> {
+    let user = s.user.as_deref().unwrap_or("root");
+    if let Some(key_path) = &s.key_file {
+        let expanded = shellexpand::tilde(key_path).to_string();
+        sess.userauth_pubkey_file(user, None, std::path::Path::new(&expanded), None).map_err(|e| format!("Key auth failed: {}", e))?;
+    } else if let Some(pass) = &s.password {
+        sess.userauth_password(user, pass).map_err(|e| format!("Password auth failed: {}", e))?;
+    } else {
+        let default_key = shellexpand::tilde("~/.ssh/id_rsa").to_string();
+        if std::path::Path::new(&default_key).exists() {
+            sess.userauth_pubkey_file(user, None, std::path::Path::new(&default_key), None).map_err(|e| format!("Default key auth failed: {}", e))?;
+        } else {
+            let _ = sess.userauth_agent(user);
+        }
+    }
+    Ok(())
+}
+
+fn start_ssh_monitor_task(
+    app: AppHandle,
+    state: Arc<GlobalState>,
+    server: ServerConfig,
+    jid: Option<String>,
+    interval: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let smi_cmd = "nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw --format=csv,noheader,nounits";
+        loop {
+            let app_inner = app.clone();
+            let state_inner = state.clone();
+            let s_m = server.clone();
+            let j_m = jid.clone();
+            
+            let res = tokio::task::spawn_blocking(move || -> Option<()> {
+                let host_id = format!("{}:{}", s_m.host, s_m.port.unwrap_or(22));
+                let tcp = TcpStream::connect(&host_id).ok()?;
+                let mut sess = Session::new().ok()?;
+                sess.set_tcp_stream(tcp);
+                sess.handshake().ok()?;
+                
+                ssh_authenticate(&mut sess, &s_m).ok()?;
+                
+                let mut batch = String::new();
+                let mut channel = sess.channel_session().ok()?;
+                let watch_cmd = match &j_m {
+                    Some(id) => format!("srun --jobid {} --overlap --ntasks=1 --job-name=widgitron-gpu sh -c 'while true; do {}; echo \"END_BATCH\"; sleep {}; done'", id, smi_cmd, interval),
+                    None => format!("sh -c 'while true; do {}; echo \"END_BATCH\"; sleep {}; done'", smi_cmd, interval),
+                };
+                
+                if channel.exec(&watch_cmd).is_err() { return None; }
+                
+                let reader = std::io::BufReader::new(channel);
+                use std::io::BufRead;
+                for line in reader.lines() {
+                    if let Ok(l) = line {
+                        if l.trim() == "END_BATCH" {
+                            let mut parsed = parse_nvidia_smi_output(&batch);
+                            if !parsed.is_empty() {
+                                for p in &mut parsed { p.job_id = j_m.clone(); }
+                                if let Ok(mut state_gpu) = state_inner.gpu_data.lock() {
+                                    let data = state_gpu.entry(s_m.host.clone()).or_insert(ServerGpuData {
+                                        host: s_m.host.clone(), is_online: true, gpu_list: vec![], error: None,
+                                    });
+                                    data.gpu_list.retain(|g| g.job_id != j_m);
+                                    data.gpu_list.extend(parsed.clone());
+                                    let data_clone = data.clone();
+                                    let _ = app_inner.emit("gpu_update", data_clone);
+                                }
+                            }
+                            batch.clear();
+                        } else {
+                            batch.push_str(&l);
+                            batch.push('\n');
+                        }
+                    }
+                }
+                Some(())
+            }).await;
+            
+            if res.is_err() || res.unwrap().is_none() {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            } else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    })
+}
+
 async fn start_gpu_monitor(app: AppHandle, state: Arc<GlobalState>) {
     let smi_cmd = "nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw --format=csv,noheader,nounits";
 
@@ -257,33 +347,21 @@ async fn start_gpu_monitor(app: AppHandle, state: Arc<GlobalState>) {
                                 } else {
                                     // SSH Logic
                                     let sess = match sess_opt {
-                                        Some(s) => s,
+                                        Some(sess) => sess,
                                         None => {
                                             let host_id = format!("{}:{}", s.host, s.port.unwrap_or(22));
                                             let tcp = TcpStream::connect(&host_id).map_err(|e| format!("TCP connect failed: {}", e))?;
                                             let mut sess = Session::new().map_err(|e| e.to_string())?;
                                             sess.set_tcp_stream(tcp);
                                             sess.handshake().map_err(|e| format!("SSH handshake failed: {}", e))?;
-
-                                            let user = s.user.as_deref().unwrap_or("root");
-                                            if let Some(key_path) = &s.key_file {
-                                                let expanded = shellexpand::tilde(key_path).to_string();
-                                                sess.userauth_pubkey_file(user, None, std::path::Path::new(&expanded), None).map_err(|e| format!("Key auth failed: {}", e))?;
-                                            } else if let Some(pass) = &s.password {
-                                                sess.userauth_password(user, pass).map_err(|e| format!("Password auth failed: {}", e))?;
-                                            } else {
-                                                let default_key = shellexpand::tilde("~/.ssh/id_rsa").to_string();
-                                                if std::path::Path::new(&default_key).exists() {
-                                                    sess.userauth_pubkey_file(user, None, std::path::Path::new(&default_key), None).map_err(|e| format!("Default key auth failed: {}", e))?;
-                                                } else {
-                                                    sess.userauth_agent(user).map_err(|e| format!("Agent auth failed: {}", e))?;
-                                                }
-                                            }
+                                            ssh_authenticate(&mut sess, &s)?;
                                             sess
                                         }
                                     };
 
                                     gpu_data.is_online = true;
+                                    let mut desired_monitor_keys = Vec::new();
+                                    
                                     if s.use_slurm.unwrap_or(false) {
                                         if squeue_needed {
                                             let user = s.user.as_deref().unwrap_or("root");
@@ -296,91 +374,56 @@ async fn start_gpu_monitor(app: AppHandle, state: Arc<GlobalState>) {
                                                 }
                                             }
                                         }
-
-                                        // Ensure monitor tasks for each job
                                         for jid in &job_ids {
-                                            let monitor_key = format!("{}:{}", s.host, jid);
-                                            let mut monitors = state_task.active_monitors.lock().unwrap();
-                                            if !monitors.contains_key(&monitor_key) {
-                                                let app_inner = app_task.clone();
-                                                let state_inner = state_task.clone();
-                                                let server_inner = s.clone();
-                                                let smi_inner = smi.clone();
-                                                let jid_inner = jid.clone();
-                                                
-                                                let handle = tokio::spawn(async move {
-                                                    loop {
-                                                        let app_mon = app_inner.clone();
-                                                        let state_mon = state_inner.clone();
-                                                        let res_mon = tokio::task::spawn_blocking({
-                                                            let s_m = server_inner.clone();
-                                                            let j_m = jid_inner.clone();
-                                                            let smi_m = smi_inner.clone();
-                                                            move || {
-                                                                let host_id = format!("{}:{}", s_m.host, s_m.port.unwrap_or(22));
-                                                                let tcp = TcpStream::connect(&host_id).ok()?;
-                                                                let mut sess_m = Session::new().ok()?;
-                                                                sess_m.set_tcp_stream(tcp);
-                                                                sess_m.handshake().ok()?;
-                                                                let user_m = s_m.user.as_deref().unwrap_or("root");
-                                                                if let Some(pass) = &s_m.password {
-                                                                    sess_m.userauth_password(user_m, pass).ok()?;
-                                                                } else {
-                                                                    let default_key = shellexpand::tilde("~/.ssh/id_rsa").to_string();
-                                                                    sess_m.userauth_pubkey_file(user_m, None, std::path::Path::new(&default_key), None).ok()?;
-                                                                }
-                                                                let mut channel = sess_m.channel_session().ok()?;
-                                                                let watch_cmd = format!("srun --jobid {} --overlap --ntasks=1 --job-name=widgitron-gpu sh -c 'while true; do {}; sleep 5; done'", j_m, smi_m);
-                                                                channel.exec(&watch_cmd).ok()?;
-                                                                let reader = std::io::BufReader::new(channel);
-                                                                use std::io::BufRead;
-                                                                for line in reader.lines() {
-                                                                    if let Ok(l) = line {
-                                                                        let mut parsed = parse_nvidia_smi_output(&l);
-                                                                        if !parsed.is_empty() {
-                                                                            for p in &mut parsed { p.job_id = Some(j_m.clone()); }
-                                                                            if let Ok(mut state_gpu) = state_mon.gpu_data.lock() {
-                                                                                let data = state_gpu.entry(s_m.host.clone()).or_insert(ServerGpuData {
-                                                                                    host: s_m.host.clone(), is_online: true, gpu_list: vec![], error: None,
-                                                                                });
-                                                                                data.gpu_list.retain(|g| g.job_id != Some(j_m.clone()));
-                                                                                data.gpu_list.extend(parsed.clone());
-                                                                                let data_clone = data.clone();
-                                                                                let _ = app_mon.emit("gpu_update", data_clone);
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                                Some(())
-                                                            }
-                                                        }).await;
-                                                        if res_mon.is_err() || res_mon.unwrap().is_none() {
-                                                            tokio::time::sleep(Duration::from_secs(10)).await;
-                                                        }
-                                                    }
-                                                });
-                                                monitors.insert(monitor_key, handle);
-                                            }
-                                        }
-
-                                        if let Ok(data) = state_task.gpu_data.lock() {
-                                            if let Some(cached) = data.get(&s.host) {
-                                                gpu_data.gpu_list = cached.gpu_list.clone();
-                                            }
-                                        }
-
-                                        // Fallback if no jobs or no data
-                                        if gpu_data.gpu_list.is_empty() {
-                                            if let Ok(mut channel) = sess.channel_session() {
-                                                if let Ok(_) = channel.exec(&smi) {
-                                                    let mut s_out = String::new();
-                                                    let _ = channel.read_to_string(&mut s_out);
-                                                    gpu_data.gpu_list = parse_nvidia_smi_output(&s_out);
-                                                }
-                                            }
+                                            desired_monitor_keys.push(format!("{}:{}", s.host, jid));
                                         }
                                     } else {
-                                        // Non-slurm regular poll
+                                        desired_monitor_keys.push(format!("{}:node", s.host));
+                                    }
+
+                                    // Ensure monitor tasks are running
+                                    for key in &desired_monitor_keys {
+                                        let mut monitors = state_task.active_monitors.lock().unwrap();
+                                        if !monitors.contains_key(key) {
+                                            let jid = if key.ends_with(":node") { None } else { Some(key.split(':').last().unwrap().to_string()) };
+                                            let handle = start_ssh_monitor_task(
+                                                app_task.clone(),
+                                                state_task.clone(),
+                                                s.clone(),
+                                                jid,
+                                                update_interval,
+                                            );
+                                            monitors.insert(key.clone(), handle);
+                                        }
+                                    }
+                                    
+                                    // Cleanup monitors for THIS host that are no longer needed
+                                    {
+                                        let mut monitors = state_task.active_monitors.lock().unwrap();
+                                        let host_prefix = format!("{}:", s.host);
+                                        monitors.retain(|key, handle| {
+                                            if key.starts_with(&host_prefix) {
+                                                if !desired_monitor_keys.contains(key) {
+                                                    handle.abort();
+                                                    false
+                                                } else {
+                                                    true
+                                                }
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                    }
+
+                                    // Sync GPU data from global state (updated by background monitors)
+                                    if let Ok(data) = state_task.gpu_data.lock() {
+                                        if let Some(cached) = data.get(&s.host) {
+                                            gpu_data.gpu_list = cached.gpu_list.clone();
+                                        }
+                                    }
+
+                                    // Fallback poll if no jobs or no data yet
+                                    if gpu_data.gpu_list.is_empty() {
                                         if let Ok(mut channel) = sess.channel_session() {
                                             if let Ok(_) = channel.exec(&smi) {
                                                 let mut s_out = String::new();
@@ -428,6 +471,18 @@ async fn start_gpu_monitor(app: AppHandle, state: Arc<GlobalState>) {
             workers.retain(|id, handle| {
                 if !current_server_ids.contains(id) {
                     handle.abort();
+                    // Also cleanup monitors for this host
+                    let host = id.split(':').next().unwrap_or_default();
+                    if !host.is_empty() {
+                        let mut monitors = state.active_monitors.lock().unwrap();
+                        let prefix = format!("{}:", host);
+                        monitors.retain(|k, h| {
+                            if k.starts_with(&prefix) {
+                                h.abort();
+                                false
+                            } else { true }
+                        });
+                    }
                     false
                 } else {
                     true
@@ -438,6 +493,7 @@ async fn start_gpu_monitor(app: AppHandle, state: Arc<GlobalState>) {
         tokio::time::sleep(Duration::from_secs(10)).await; // Re-check config every 10s
     }
 }
+
 
 fn process_deadlines(app: AppHandle, state: Arc<GlobalState>, config: PaperConfig, text: String) {
     let app_inner = app.clone();
@@ -612,7 +668,7 @@ async fn save_app_config(app: AppHandle, config: AppConfig) -> Result<(), String
 #[tauri::command]
 async fn get_app_config(app: AppHandle) -> Result<AppConfig, String> {
     let path = get_config_path(&app, "app_config.json");
-    if !path.exists() { return Ok(AppConfig { theme: Some("dark".into()) }); }
+    if !path.exists() { return Ok(AppConfig { theme: Some("dark".into()), always_on_top: None, embedded: None }); }
     let config_str = fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&config_str).map_err(|e| e.to_string())
 }
@@ -627,6 +683,23 @@ async fn get_deadlines(state: tauri::State<'_, GlobalState>) -> Result<Vec<Paper
 async fn get_gpu_data(state: tauri::State<'_, GlobalState>) -> Result<Vec<ServerGpuData>, String> {
     let gpu_data = state.gpu_data.lock().map_err(|e| e.to_string())?;
     Ok(gpu_data.values().cloned().collect())
+}
+
+#[tauri::command]
+async fn show_main(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    if let Some(tray_menu) = app.get_webview_window("tray-menu") {
+        let _ = tray_menu.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -666,6 +739,149 @@ fn toggle_widget(app: AppHandle, id: String, title: String) {
     }
 }
 
+#[cfg(windows)]
+unsafe extern "system" fn enum_window(hwnd: windows::Win32::Foundation::HWND, lparam: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetClassNameW};
+    use windows::Win32::Foundation::HWND;
+    use windows::core::BOOL;
+    
+    let p_workerw = lparam.0 as *mut HWND;
+    let mut class_name = [0u16; 256];
+    let len = GetClassNameW(hwnd, &mut class_name);
+    let name = String::from_utf16_lossy(&class_name[..len as usize]);
+    
+    if name == "WorkerW" {
+        let shell_view = FindWindowExW(Some(hwnd), None, windows::core::w!("SHELLDLL_DefView"), None).ok();
+        if let Some(sv) = shell_view {
+            // Parent directly to SHELLDLL_DefView
+            *p_workerw = sv;
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+#[tauri::command]
+async fn set_desktop_mode(app: AppHandle, label: String, enabled: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(&label) {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                EnumWindows, FindWindowW, FindWindowExW, SendMessageTimeoutW, SetParent, SMTO_NORMAL,
+                GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TOPMOST, SetWindowPos,
+                HWND_TOP, SWP_NOSIZE, SWP_SHOWWINDOW, SWP_FRAMECHANGED, GWL_STYLE, WS_CHILD, WS_POPUP,
+            };
+
+            let hwnd_raw = win.hwnd().map_err(|e| e.to_string())?;
+            let hwnd = HWND(hwnd_raw.0 as *mut _);
+
+            if enabled {
+                println!("Enabling desktop mode for {}", label);
+                
+                use windows::Win32::Foundation::RECT;
+                use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+                let mut rect = RECT::default();
+                unsafe { let _ = GetWindowRect(hwnd, &mut rect); }
+
+                let progman = unsafe { FindWindowW(windows::core::w!("Progman"), None) }.ok();
+                let mut result = 0;
+                if let Some(p) = progman {
+                    unsafe {
+                        SendMessageTimeoutW(p, 0x052C, WPARAM(0), LPARAM(0), SMTO_NORMAL, 1000, Some(&mut result));
+                    }
+                }
+
+                // Find SHELLDLL_DefView anywhere
+                let mut shell_view = HWND(std::ptr::null_mut());
+                
+                // Check Progman first
+                if let Some(p) = progman {
+                    if let Ok(sv) = unsafe { FindWindowExW(Some(p), None, windows::core::w!("SHELLDLL_DefView"), None) } {
+                        shell_view = sv;
+                    }
+                }
+                
+                // Check WorkerW if not found
+                if shell_view.0.is_null() {
+                    let mut workerw = HWND(std::ptr::null_mut());
+                    unsafe {
+                        let _ = EnumWindows(Some(enum_window), LPARAM(&mut workerw as *mut HWND as isize));
+                    }
+                    if !workerw.0.is_null() {
+                        shell_view = workerw; // enum_window now returns SHELLDLL_DefView directly
+                    }
+                }
+
+                let target_parent = if !shell_view.0.is_null() {
+                    use windows::Win32::UI::WindowsAndMessaging::GetParent as GetWindowParent;
+                    unsafe { GetWindowParent(shell_view).ok() }
+                } else if let Some(p) = progman {
+                    Some(p)
+                } else {
+                    None
+                };
+
+                if let Some(parent) = target_parent {
+                    println!("Found target desktop handle (Progman/WorkerW): {:?}", parent);
+                    
+                    use windows::Win32::Foundation::POINT;
+                    use windows::Win32::Graphics::Gdi::ScreenToClient;
+                    let mut pt = POINT { x: rect.left, y: rect.top };
+                    
+                    unsafe {
+                        // 1. Map screen coordinates to target parent's client coordinates
+                        let _ = ScreenToClient(parent, &mut pt);
+
+                        // 2. Adjust Styles BEFORE SetParent
+                        // WS_CLIPSIBLINGS (0x04000000), WS_CLIPCHILDREN (0x02000000), WS_VISIBLE (0x10000000)
+                        let style = GetWindowLongW(hwnd, GWL_STYLE);
+                        let clean_style = (style | WS_CHILD.0 as i32 | 0x04000000 | 0x02000000 | 0x10000000) & !(WS_POPUP.0 as i32);
+                        let _ = SetWindowLongW(hwnd, GWL_STYLE, clean_style);
+                        
+                        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                        // Explicitly remove WS_EX_TOPMOST and WS_EX_TRANSPARENT (0x00000020)
+                        let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_TOPMOST.0 as i32 | 0x00000020));
+
+                        // 3. Parent to desktop
+                        let _ = SetParent(hwnd, Some(parent));
+                        
+                        // 4. Update position and show
+                        let _ = SetWindowPos(hwnd, Some(HWND_TOP), pt.x, pt.y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                        
+                        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOW};
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                        
+                        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+                        let _ = SetFocus(Some(hwnd));
+                    }
+                    println!("Desktop mode set successfully at local ({}, {})", pt.x, pt.y);
+                } else {
+                    println!("Failed to find desktop handle");
+                }
+            } else {
+                println!("Disabling desktop mode for {}", label);
+                use windows::Win32::Foundation::RECT;
+                use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+                let mut rect = RECT::default();
+                unsafe { let _ = GetWindowRect(hwnd, &mut rect); }
+
+                unsafe {
+                    let _ = SetParent(hwnd, None);
+                    
+                    let style = GetWindowLongW(hwnd, GWL_STYLE);
+                    let _ = SetWindowLongW(hwnd, GWL_STYLE, (style & !(WS_CHILD.0 as i32)) | WS_POPUP.0 as i32);
+                    
+                    // Restore position to where it was in the desktop
+                    // Use HWND_TOP to ensure it's visible as a normal window after exiting desktop mode
+                    let _ = SetWindowPos(hwnd, Some(HWND_TOP), rect.left, rect.top, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -676,14 +892,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_widget,
             toggle_widget,
+            set_desktop_mode,
             save_gpu_config,
             save_paper_config,
             get_gpu_config,
             get_paper_config,
-            save_app_config,
             get_app_config,
+            save_app_config,
             get_deadlines,
-            get_gpu_data
+            get_gpu_data,
+            show_main,
+            exit_app
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -705,36 +924,46 @@ pub fn run() {
             });
             
             // Tray
-            let quit_i = MenuItem::with_id(&handle, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(&handle, "show", "Show Control Panel", true, None::<&str>)?;
-            let menu = Menu::with_items(&handle, &[&show_i, &quit_i])?;
-
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            window.show().unwrap();
-                            window.set_focus().unwrap();
-                        }
-                    }
-                    _ => {}
-                })
+                .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                window.hide().unwrap();
-                            } else {
-                                window.show().unwrap();
-                                window.set_focus().unwrap();
+                    use tauri::tray::{TrayIconEvent, MouseButton};
+                    match event {
+                        TrayIconEvent::Click { button: MouseButton::Right, .. } => {
+                            if let Some(window) = tray.app_handle().get_webview_window("tray-menu") {
+                                // Get cursor position to place the menu
+                                use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+                                use windows::Win32::Foundation::POINT;
+                                let mut pt = POINT::default();
+                                unsafe { let _ = GetCursorPos(&mut pt); }
+                                
+                                // Set position so bottom-left of menu is at cursor tip
+                                let scale_factor = window.scale_factor().unwrap_or(1.0);
+                                let physical_height = (70.0 * scale_factor) as i32;
+                                let _ = window.set_position(tauri::PhysicalPosition::new(pt.x, pt.y - physical_height));
+                                let _ = window.show();
+                                let _ = window.set_focus();
                             }
-                        }
+                        },
+                        TrayIconEvent::Click { button: MouseButton::Left, .. } => {
+                             // Left click can also toggle or do nothing, keeping it clean
+                        },
+                        TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                            if let Some(window) = tray.app_handle().get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        },
+                        _ => {}
                     }
                 })
                 .build(&handle)?;
+
+            // Bug fix: Explicitly hide tray-menu window on startup
+            if let Some(tray_menu) = app.get_webview_window("tray-menu") {
+                let _ = tray_menu.hide();
+            }
 
             // Background Workers
             let app_clone1 = handle.clone();

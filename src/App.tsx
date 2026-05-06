@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
-import { 
-  LayoutDashboard, 
-  Settings, 
-  Cpu, 
-  Calendar, 
-  X, 
-  Minus, 
-  Square, 
+import {
+  LayoutDashboard,
+  Settings,
+  Cpu,
+  Calendar,
+  X,
+  Minus,
+  Square,
   ChevronRight,
   Activity,
   Server,
@@ -37,76 +37,108 @@ function App() {
   const [isMaximized, setIsMaximized] = useState(false);
   const [windowLabel, setWindowLabel] = useState("");
   const [isLocked, setIsLocked] = useState(true);
-  const [isPinned, setIsPinned] = useState(true);
+  const [isPinned, setIsPinned] = useState(false);
   const [gpuData, setGpuData] = useState<any[]>([]);
   const [deadlines, setDeadlines] = useState<any[]>([]);
   const [gpuConfig, setGpuConfig] = useState<any>({ servers: [] });
   const [paperConfig, setPaperConfig] = useState<any>({});
-  const [appConfig, setAppConfig] = useState<any>({ theme: "dark" });
+  const [appConfig, setAppConfig] = useState<any>(() => {
+    try {
+      const saved = localStorage.getItem("widgitron-theme") || "dark";
+      return { theme: saved };
+    } catch (e) {
+      return { theme: "dark" };
+    }
+  });
   const [isAutostart, setIsAutostart] = useState(false);
   const [activeWidgets, setActiveWidgets] = useState<string[]>([]);
 
   useEffect(() => {
-    try {
-      const win = appWindow;
-      setWindowLabel(win.label);
-      
-      const unlisten = win.onResized(async () => {
-        const maximized = await win.isMaximized();
-        setIsMaximized(maximized);
-      });
-      
-      const loadConfigs = async () => {
-        try {
-          const gc = await invoke("get_gpu_config");
-          const pc = await invoke("get_paper_config");
-          const ac = await invoke("get_app_config");
-          const initialDeadlines: any = await invoke("get_deadlines");
-          const initialGpuData: any = await invoke("get_gpu_data");
-          
-          setGpuConfig(gc);
-          setPaperConfig(pc);
-          setAppConfig(ac);
-          setDeadlines(initialDeadlines);
-          setGpuData(initialGpuData);
-          setIsAutostart(await isEnabled());
-          
-          // Initial check for active widgets
-          const windows = await getAllWebviewWindows();
-          const active = [];
-          for (const win of windows) {
-            if (win.label.startsWith("widget-") && await win.isVisible()) {
-              active.push(win.label);
-            }
+    const win = appWindow;
+    setWindowLabel(win.label);
+
+    const unlisten = win.onResized(async () => {
+      const maximized = await win.isMaximized();
+      setIsMaximized(maximized);
+    });
+
+    const loadConfigs = async () => {
+      try {
+        const gc = await invoke("get_gpu_config");
+        const pc = await invoke("get_paper_config");
+        const ac = await invoke("get_app_config") as any;
+        const initialDeadlines: any = await invoke("get_deadlines");
+        const initialGpuData: any = await invoke("get_gpu_data");
+
+        setGpuConfig(gc);
+        setPaperConfig(pc);
+        setAppConfig(ac);
+        if (ac.theme) localStorage.setItem("widgitron-theme", ac.theme);
+        setDeadlines(initialDeadlines);
+        setGpuData(initialGpuData);
+        setIsAutostart(await isEnabled());
+
+        const label = win.label;
+        if (label.startsWith("widget-")) {
+          let pinned = false;
+          if (ac.always_on_top?.[label] !== undefined) {
+            pinned = ac.always_on_top[label];
           }
-          setActiveWidgets(active);
-        } catch (e) { console.error("Failed to load configs", e); }
-      };
+          
+          setIsPinned(pinned);
+          if (pinned) {
+            await win.setAlwaysOnTop(true);
+            await invoke("set_desktop_mode", { label, enabled: false });
+          } else {
+            await win.setAlwaysOnTop(false);
+            await invoke("set_desktop_mode", { label, enabled: true });
+          }
+        }
+
+        // Initial check for active widgets
+        const windows = await getAllWebviewWindows();
+        const active = [];
+        for (const w of windows) {
+          if (w.label.startsWith("widget-") && await w.isVisible()) {
+            active.push(w.label);
+          }
+        }
+        setActiveWidgets(active);
+      } catch (e) { console.error("Failed to load configs", e); }
+    };
+
+    if (win.label === "tray-menu") {
+      const unlistenBlur = win.onFocusChanged((event) => {
+        if (!event.payload) win.hide();
+      });
       loadConfigs();
-
-      const unlistenGpu = listen<any>("gpu_update", (event) => {
-        const item = event.payload;
-        setGpuData(prev => {
-          const index = prev.findIndex(s => s.host === item.host);
-          if (index === -1) return [...prev, item];
-          const next = [...prev];
-          next[index] = item;
-          return next;
-        });
-      });
-
-      const unlistenPaper = listen<any[]>("paper_update", (event) => {
-        setDeadlines(event.payload);
-      });
-
-      return () => { 
-        unlisten.then(f => f()); 
-        unlistenGpu.then(f => f());
-        unlistenPaper.then(f => f());
+      return () => {
+        unlistenBlur.then((f: any) => f());
       };
-    } catch (e) {
-      console.error("Failed to init App", e);
     }
+
+    loadConfigs();
+
+    const unlistenGpu = listen<any>("gpu_update", (event) => {
+      const item = event.payload;
+      setGpuData(prev => {
+        const index = prev.findIndex(s => s.host === item.host);
+        if (index === -1) return [...prev, item];
+        const next = [...prev];
+        next[index] = item;
+        return next;
+      });
+    });
+
+    const unlistenPaper = listen<any[]>("paper_update", (event) => {
+      setDeadlines(event.payload);
+    });
+
+    return () => {
+      unlisten.then(f => f());
+      unlistenGpu.then(f => f());
+      unlistenPaper.then(f => f());
+    };
   }, []);
 
   const saveGpuConfig = async (newConfig: any) => {
@@ -135,12 +167,13 @@ function App() {
     try {
       await invoke("save_app_config", { config: newConfig });
       setAppConfig(newConfig);
+      if (newConfig.theme) localStorage.setItem("widgitron-theme", newConfig.theme);
     } catch (e) { console.error("Save failed", e); }
   };
 
   const toggleMaximize = async () => {
     try {
-      await getCurrentWindow().toggleMaximize();
+      await appWindow.toggleMaximize();
     } catch (e) { console.error(e); }
   };
 
@@ -157,13 +190,49 @@ function App() {
     } catch (e) { console.error("Toggle failed", e); }
   };
 
-  const toggleLock = () => setIsLocked(!isLocked);
+  const toggleLock = async () => {
+    const nextLocked = !isLocked;
+    setIsLocked(nextLocked);
+    
+    // When unlocking, we MUST exit desktop mode to allow movement
+    // When locking, if we are NOT pinned, we re-enter desktop mode
+    if (windowLabel.startsWith("widget-")) {
+      if (!nextLocked) {
+        // Unlocking: Exit desktop mode
+        await invoke("set_desktop_mode", { label: windowLabel, enabled: false });
+      } else {
+        // Locking: If not pinned, re-embed
+        if (!isPinned) {
+          await invoke("set_desktop_mode", { label: windowLabel, enabled: true });
+        }
+      }
+    }
+  };
 
-  const togglePin = async () => {
+  const togglePin = async (labelToToggle?: string) => {
     try {
-      const next = !isPinned;
-      await getCurrentWindow().setAlwaysOnTop(next);
-      setIsPinned(next);
+      const targetLabel = labelToToggle || windowLabel;
+      const currentVal = targetLabel === windowLabel ? isPinned : (appConfig.always_on_top?.[targetLabel] || false);
+      const next = !currentVal;
+      
+      const targetWin = targetLabel === windowLabel ? appWindow : await WebviewWindow.getByLabel(targetLabel);
+      
+      if (next) {
+        // Turning ON Always on Top: Disable Desktop Mode FIRST, then set top
+        await invoke("set_desktop_mode", { label: targetLabel, enabled: false });
+        await targetWin?.setAlwaysOnTop(true);
+      } else {
+        // Turning OFF Always on Top: Enable Desktop Mode (Embedded)
+        await targetWin?.setAlwaysOnTop(false);
+        await invoke("set_desktop_mode", { label: targetLabel, enabled: true });
+      }
+
+      if (targetLabel === windowLabel) {
+        setIsPinned(next);
+      }
+      
+      const nextStates = { ...(appConfig.always_on_top || {}), [targetLabel]: next };
+      await saveAppConfig({ ...appConfig, always_on_top: nextStates });
     } catch (e) { console.error(e); }
   };
 
@@ -190,6 +259,28 @@ function App() {
     }
   };
 
+  // --- CUSTOM TRAY MENU VIEW ---
+  if (windowLabel === "tray-menu") {
+    return (
+      <div className="h-screen w-screen flex flex-col bg-white border border-slate-200 rounded-lg overflow-hidden shadow-xl p-1 select-none">
+        <button 
+          onClick={() => invoke("show_main")} 
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-md hover:bg-slate-100 text-slate-700 transition-colors group"
+        >
+          <LayoutDashboard size={14} className="text-slate-500 group-hover:text-blue-600 transition-colors" />
+          <span className="text-[11px] font-bold">Dashboard</span>
+        </button>
+        <button 
+          onClick={() => invoke("exit_app")} 
+          className="w-full flex items-center gap-3 px-3 py-2 rounded-md hover:bg-red-50 text-slate-700 hover:text-red-600 transition-colors group"
+        >
+          <X size={14} className="text-slate-500 group-hover:text-red-500 transition-colors" />
+          <span className="text-[11px] font-bold">Exit</span>
+        </button>
+      </div>
+    );
+  }
+
   // --- DESKTOP WIDGET VIEW ---
   if (windowLabel.startsWith("widget-")) {
     const isGpu = windowLabel.includes("gpu");
@@ -202,7 +293,7 @@ function App() {
           <button data-no-drag="true" onClick={toggleLock} className="w-7 h-7 flex items-center justify-center rounded-md bg-black/60 border border-white/10 text-white/70 hover:text-white transition-all shadow-lg backdrop-blur-md">
             {isLocked ? <Lock size={12} /> : <Unlock size={12} />}
           </button>
-          <button data-no-drag="true" onClick={togglePin} className={`w-7 h-7 flex items-center justify-center rounded-md bg-black/60 border border-white/10 ${isPinned ? "text-blue-400" : "text-white/70"} hover:text-white transition-all shadow-lg backdrop-blur-md`} title={isPinned ? "Unpin from top" : "Pin to top"}>
+          <button data-no-drag="true" onClick={() => togglePin()} className={`w-7 h-7 flex items-center justify-center rounded-md bg-black/60 border border-white/10 ${isPinned ? "text-blue-400" : "text-white/70"} hover:text-white transition-all shadow-lg backdrop-blur-md`} title={isPinned ? "Unpin (Embed in Desktop)" : "Pin to top"}>
             {isPinned ? <Pin size={12} /> : <PinOff size={12} />}
           </button>
           <button data-no-drag="true" onClick={handleClose} className="w-7 h-7 flex items-center justify-center rounded-md bg-red-500/30 border border-red-500/20 text-red-400 hover:bg-red-500 hover:text-white transition-all shadow-lg backdrop-blur-md">
@@ -211,8 +302,8 @@ function App() {
         </div>
 
         {/* The Glass Card (Fills the window, buttons overlap content) */}
-        <div 
-          className={`flex-1 bg-slate-900/95 backdrop-blur-3xl border border-white/10 p-5 flex flex-col gap-4 relative overflow-hidden rounded-xl z-10 ${isLocked ? "pointer-events-none" : "pointer-events-auto shadow-2xl shadow-black/80"}`}
+        <div
+          className={`flex-1 bg-slate-900/95 backdrop-blur-3xl border border-white/10 p-5 flex flex-col gap-4 relative overflow-hidden rounded-xl z-10 ${isLocked ? "" : "shadow-2xl shadow-black/80"}`}
           onMouseDown={!isLocked ? startDrag : undefined}
           data-tauri-drag-region={!isLocked ? "true" : "false"}
         >
@@ -225,7 +316,7 @@ function App() {
 
   // --- MAIN CONTROL PANEL VIEW ---
   return (
-    <div className={`flex h-screen w-screen overflow-hidden ${appConfig.theme === "light" ? "light-theme" : ""} glass rounded-xl border-none shadow-2xl relative`}>
+    <div className={`flex h-screen w-screen overflow-hidden ${appConfig.theme === "light" ? "light-theme" : ""} glass ${isMaximized ? "rounded-none" : "rounded-xl dashboard-accent-border"} relative`}>
       {/* Sidebar */}
       <aside className={`w-64 border-r border-white/5 flex flex-col bg-[var(--sidebar-bg)] z-20 select-none`} onMouseDown={startDrag}>
         <div className="p-6 flex items-center gap-2.5 cursor-default">
@@ -263,7 +354,7 @@ function App() {
           <div className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 pointer-events-none">{activeTab}</div>
           <div className="flex items-center gap-0.5 z-[60] pointer-events-auto">
             <WindowButton icon={<Minus size={16} />} onClick={() => appWindow.minimize()} theme={appConfig.theme} />
-            <WindowButton icon={isMaximized ? <Square size={12} /> : <Square size={14} />} onClick={toggleMaximize} theme={appConfig.theme} />
+            <WindowButton icon={isMaximized ? <Copy size={12} /> : <Square size={14} />} onClick={toggleMaximize} theme={appConfig.theme} />
             <WindowButton icon={<X size={18} />} onClick={handleClose} hoverColor="hover:bg-red-500" theme={appConfig.theme} />
           </div>
         </header>
@@ -275,30 +366,28 @@ function App() {
                 <StatCard label="Online Servers" value={gpuData.filter(s => s.is_online).length.toString()} icon={<Server className="text-blue-400" />} theme={appConfig.theme} />
                 <StatCard label="Total GPUs" value={gpuData.reduce((acc, s) => acc + s.gpu_list.length, 0).toString()} icon={<Cpu className="text-purple-400" />} theme={appConfig.theme} />
                 <StatCard label="Active Deadlines" value={deadlines.length.toString()} icon={<Calendar className="text-emerald-400" />} theme={appConfig.theme} />
-                
+
                 <div className="col-span-full mt-4">
                   <h2 className={`text-xl font-bold tracking-tight mb-6 ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>Quick Launch Widgets</h2>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="cursor-pointer" onClick={() => handleToggleWidget("widget-gpu-default", "GPU Monitor")}>
-                      <WidgetPreviewCard 
-                        title="GPU Monitor Widget" 
-                        status={activeWidgets.includes("widget-gpu-default") ? "Active" : "Ready"} 
-                        detail="Floating desktop monitoring for GPU clusters" 
-                        trend={activeWidgets.includes("widget-gpu-default") ? "Close" : "Launch"} 
-                        color="blue" 
-                        theme={appConfig.theme}
-                      />
-                    </div>
-                    <div className="cursor-pointer" onClick={() => handleToggleWidget("widget-deadlines-default", "Deadlines")}>
-                      <WidgetPreviewCard 
-                        title="Paper Deadline Widget" 
-                        status={activeWidgets.includes("widget-deadlines-default") ? "Active" : "Ready"} 
-                        detail="Track conference deadlines on your desktop" 
-                        trend={activeWidgets.includes("widget-deadlines-default") ? "Close" : "Launch"} 
-                        color="purple" 
-                        theme={appConfig.theme}
-                      />
-                    </div>
+                    <WidgetPreviewCard
+                      title="GPU Monitor Widget"
+                      status={activeWidgets.includes("widget-gpu-default") ? "Active" : "Ready"}
+                      detail="Floating desktop monitoring for GPU clusters"
+                      trend={activeWidgets.includes("widget-gpu-default") ? "Close" : "Launch"}
+                      color="blue"
+                      theme={appConfig.theme}
+                      onLaunch={() => handleToggleWidget("widget-gpu-default", "GPU Monitor")}
+                    />
+                    <WidgetPreviewCard
+                      title="Paper Deadline Widget"
+                      status={activeWidgets.includes("widget-deadlines-default") ? "Active" : "Ready"}
+                      detail="Track conference deadlines on your desktop"
+                      trend={activeWidgets.includes("widget-deadlines-default") ? "Close" : "Launch"}
+                      color="purple"
+                      theme={appConfig.theme}
+                      onLaunch={() => handleToggleWidget("widget-deadlines-default", "Deadlines")}
+                    />
                   </div>
                 </div>
               </motion.div>
@@ -313,7 +402,7 @@ function App() {
                   {gpuData.length === 0 ? (
                     <div className="p-12 text-center bg-black/5 rounded-3xl border border-dashed border-white/10 text-slate-500 font-bold uppercase tracking-widest text-xs">No active data. Configure servers in Settings.</div>
                   ) : gpuData.map((server, idx) => (
-                    <div key={idx} className={`border border-[var(--dashboard-border)] rounded-2xl p-6 shadow-sm ${appConfig.theme === "light" ? "bg-white" : "bg-white/5"}`}>
+                    <div key={idx} className="glass-card p-6">
                       <div className="flex items-center justify-between mb-6">
                         <div className="flex items-center gap-3">
                           <div className={`w-3 h-3 rounded-full ${server.is_online ? "bg-emerald-500 shadow-[0_0_10px_#10b981]" : "bg-red-500"}`} />
@@ -321,38 +410,59 @@ function App() {
                         </div>
                         <span className="text-xs font-black text-slate-500 uppercase tracking-widest">{server.gpu_list.length} GPUs Detected</span>
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {server.gpu_list.map((gpu: any, gidx: number) => (
-                          <div key={gidx} className={`p-5 rounded-xl border ${appConfig.theme === "light" ? "bg-slate-50 border-slate-100" : "bg-black/20 border-white/5"} relative group transition-all hover:bg-black/5`}>
-                            <div className="flex items-center justify-between mb-4">
-                              <span className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.name}</span>
-                              <span className={`text-[10px] font-black ${gpu.util > 80 ? "text-red-500" : "text-blue-400"} uppercase tracking-widest`}>{gpu.util}%</span>
-                            </div>
-                            
-                            <div className="space-y-4">
-                              <div>
-                                <div className="flex justify-between text-[10px] text-slate-500 font-bold uppercase tracking-tighter mb-1">
-                                  <span>Load</span>
-                                  <span>{gpu.util}%</span>
+                      <div className="space-y-8">
+                        {(() => {
+                          const groups: Record<string, any[]> = {};
+                          server.gpu_list.forEach((gpu: any) => {
+                            const gid = gpu.job_id || "SYSTEM";
+                            if (!groups[gid]) groups[gid] = [];
+                            groups[gid].push(gpu);
+                          });
+
+                          return Object.entries(groups).map(([jobId, gpus]) => (
+                            <div key={jobId} className="space-y-4">
+                              {jobId !== "SYSTEM" && (
+                                <div className="flex items-center gap-2 text-xs font-black text-blue-400 uppercase tracking-[0.2em] mb-2 px-1">
+                                  <Activity size={14} /> Job: {jobId}
+                                  <CopyButton text={jobId} />
                                 </div>
-                                <div className={`w-full ${appConfig.theme === "light" ? "bg-slate-200" : "bg-white/5"} h-1.5 rounded-full overflow-hidden mt-1`}>
-                                  <motion.div initial={{ width: 0 }} animate={{ width: `${gpu.util}%` }} className={`h-full rounded-full ${gpu.util > 80 ? "bg-red-500" : "bg-blue-500"}`} />
-                                </div>
+                              )}
+                              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {gpus.map((gpu, gidx) => (
+                                  <div key={gidx} className={`p-5 rounded-xl border ${appConfig.theme === "light" ? "bg-slate-50 border-slate-100" : "bg-black/20 border-white/5"} relative group transition-all hover:bg-black/5`}>
+                                    <div className="flex items-center justify-between mb-4">
+                                      <span className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.name}</span>
+                                      <span className={`text-[10px] font-black ${gpu.util > 80 ? "text-red-500" : "text-blue-400"} uppercase tracking-widest`}>{gpu.util}%</span>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                      <div>
+                                        <div className="flex justify-between text-[10px] text-slate-500 font-bold uppercase tracking-tighter mb-1">
+                                          <span>Load</span>
+                                          <span>{gpu.util}%</span>
+                                        </div>
+                                        <div className={`w-full ${appConfig.theme === "light" ? "bg-slate-200" : "bg-white/5"} h-1.5 rounded-full overflow-hidden mt-1`}>
+                                          <motion.div initial={{ width: 0 }} animate={{ width: `${gpu.util}%` }} className={`h-full rounded-full ${gpu.util > 80 ? "bg-red-500" : "bg-blue-500"}`} />
+                                        </div>
+                                      </div>
+
+                                      <div className="grid grid-cols-2 gap-4">
+                                        <div className={`p-2 rounded-lg ${appConfig.theme === "light" ? "bg-white" : "bg-white/5"}`}>
+                                          <div className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">Temp</div>
+                                          <div className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.temp}°C</div>
+                                        </div>
+                                        <div className={`p-2 rounded-lg ${appConfig.theme === "light" ? "bg-white" : "bg-white/5"}`}>
+                                          <div className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">Memory</div>
+                                          <div className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.mem_used}/{gpu.mem_total}MB</div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
                               </div>
-                              
-                              <div className="grid grid-cols-2 gap-4">
-                                <div className={`p-2 rounded-lg ${appConfig.theme === "light" ? "bg-white" : "bg-white/5"}`}>
-                                  <div className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">Temp</div>
-                                  <div className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.temp}°C</div>
-                                </div>
-                                <div className={`p-2 rounded-lg ${appConfig.theme === "light" ? "bg-white" : "bg-white/5"}`}>
-                                  <div className="text-[10px] text-slate-500 font-bold uppercase tracking-tighter">Memory</div>
-                                  <div className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>{gpu.mem_used}/{gpu.mem_total}MB</div>
-                                </div>
-                              </div>
                             </div>
-                          </div>
-                        ))}
+                          ));
+                        })()}
                       </div>
                       {server.error && <p className="mt-4 text-[10px] text-red-400/60 italic font-medium break-all">{server.error}</p>}
                     </div>
@@ -375,7 +485,7 @@ function App() {
                           <div className={`w-16 h-16 rounded-2xl flex flex-col items-center justify-center relative ${appConfig.theme === "light" ? "bg-purple-100 text-purple-600" : "bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/20 text-purple-400"}`}>
                             <span className="text-[10px] font-black uppercase tracking-tighter opacity-60">{dl.sub}</span>
                             <Trophy size={20} className={appConfig.theme === "light" ? "text-purple-600" : "text-purple-400"} />
-                            <button 
+                            <button
                               onClick={() => togglePinConference(dl.title)}
                               className={`absolute -top-2 -right-2 p-1.5 rounded-full shadow-lg transition-all ${isPinned ? "bg-amber-500 text-white scale-110" : "bg-slate-800 text-slate-500 opacity-0 group-hover:opacity-100"}`}
                             >
@@ -405,11 +515,11 @@ function App() {
             )}
 
             {activeTab === "settings" && (
-              <SettingsPanel 
-                gpuConfig={gpuConfig} 
-                paperConfig={paperConfig} 
+              <SettingsPanel
+                gpuConfig={gpuConfig}
+                paperConfig={paperConfig}
                 appConfig={appConfig}
-                onSaveGpu={saveGpuConfig} 
+                onSaveGpu={saveGpuConfig}
                 onSavePaper={savePaperConfig}
                 onSaveApp={saveAppConfig}
                 togglePin={togglePinConference}
@@ -438,20 +548,20 @@ function DeadlineCountdown({ date }: { date: string }) {
       const target = new Date(date).getTime();
       const now = new Date().getTime();
       const diff = target - now;
-      
+
       if (diff <= 0) {
         setTimeLeft("EXPIRED");
         return;
       }
-      
+
       const d = Math.floor(diff / (1000 * 60 * 60 * 24));
       const h = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
       const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
       const s = Math.floor((diff % (1000 * 60)) / 1000);
-      
+
       setTimeLeft(`${d}d ${h}h ${m}m ${s}s`);
     };
-    
+
     calculate();
     const interval = setInterval(calculate, 1000);
     return () => clearInterval(interval);
@@ -505,9 +615,9 @@ function GPUWidgetContent() {
                   <span className="text-[7px] text-red-400 font-black uppercase opacity-60">Offline</span>
                 )}
               </div>
-              
+
               {server.error && <div className="text-[9px] text-red-400/60 font-medium italic px-2">{server.error}</div>}
-              
+
               <div className="space-y-3 pl-2">
                 {Object.entries(groups).map(([jobId, gpus]) => (
                   <div key={jobId} className="space-y-1.5">
@@ -576,7 +686,7 @@ function DeadlineWidgetContent() {
 
   const pinnedTitles = paperConfig.pinned_titles || [];
   const pinnedList = deadlines.filter(d => pinnedTitles.includes(d.title));
-  
+
   // If no pinned, show the closest one
   const displayList = pinnedList.length > 0 ? pinnedList : (deadlines.length > 0 ? [deadlines[0]] : []);
 
@@ -586,7 +696,7 @@ function DeadlineWidgetContent() {
         <Trophy size={16} className="text-amber-400" />
         <span className="text-xs font-black uppercase tracking-widest text-white">Deadlines</span>
       </div>
-      
+
       <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 w-full space-y-2">
         {displayList.length > 0 ? displayList.map((dl, idx) => (
           <div key={idx} className="bg-white/5 rounded-xl p-3 border border-white/5 relative overflow-hidden group transition-all hover:bg-white/10">
@@ -622,8 +732,8 @@ function DeadlineWidgetContent() {
 function SidebarLink({ icon, label, active, onClick, theme = "dark" }: { icon: any, label: string, active: boolean, onClick: () => void, theme?: string }) {
   const isLight = theme === "light";
   return (
-    <button data-no-drag="true" onClick={onClick} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl transition-all duration-300 group ${active 
-      ? (isLight ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "bg-blue-600/20 text-blue-400 border border-blue-500/20") 
+    <button data-no-drag="true" onClick={onClick} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-2xl transition-all duration-300 group ${active
+      ? (isLight ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "bg-blue-600/20 text-blue-400 border border-blue-500/20")
       : (isLight ? "hover:bg-slate-100 text-slate-500 hover:text-slate-900" : "hover:bg-white/5 text-slate-500 hover:text-slate-200")}`}>
       <span className={`${active ? (isLight ? "text-white" : "text-blue-400") : (isLight ? "text-slate-400 group-hover:text-blue-600" : "group-hover:text-blue-400/80")}`}>{icon}</span>
       <span className={`font-bold text-sm ${active ? (isLight ? "text-white" : "text-white") : ""}`}>{label}</span>
@@ -651,7 +761,7 @@ function StatCard({ label, value, icon, theme = "dark" }: { label: string, value
   );
 }
 
-function WidgetPreviewCard({ title, status, detail, trend, color, theme = "dark" }: { title: string, status: string, detail: string, trend: string, color: string, theme?: string }) {
+function WidgetPreviewCard({ title, status, detail, trend, color, theme = "dark", onLaunch }: { title: string, status: string, detail: string, trend: string, color: string, theme?: string, onLaunch: () => void }) {
   const isLight = theme === "light";
   const colors: Record<string, string> = isLight ? {
     blue: "bg-blue-50 border-blue-200/60 text-blue-600",
@@ -661,14 +771,18 @@ function WidgetPreviewCard({ title, status, detail, trend, color, theme = "dark"
     purple: "from-purple-600/10 to-purple-900/10 border-purple-500/20 text-purple-400",
   };
   return (
-    <div className={`p-6 rounded-2xl border ${isLight ? colors[color] : `bg-gradient-to-br ${colors[color]}`} transition-all ${isLight ? "hover:shadow-md hover:border-blue-300" : "hover:border-white/30"} group cursor-pointer shadow-sm`}>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className={`font-bold text-lg tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>{title}</h3>
-        <span className={`text-[10px] uppercase font-black px-2.5 py-1 rounded-lg border ${isLight ? "bg-white border-slate-200 text-slate-600" : "bg-white/5 border-white/5 text-slate-400"}`}>{status}</span>
+    <div className={`p-6 rounded-2xl border ${isLight ? colors[color] : `bg-gradient-to-br ${colors[color]}`} transition-all ${isLight ? "hover:shadow-md hover:border-blue-300" : "hover:border-white/30"} group shadow-sm flex flex-col justify-between`}>
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className={`font-bold text-lg tracking-tight ${isLight ? "text-slate-900" : "text-white"}`}>{title}</h3>
+          <div className="flex items-center gap-2">
+            <span className={`text-[10px] uppercase font-black px-2.5 py-1 rounded-lg border ${isLight ? "bg-white border-slate-200 text-slate-600" : "bg-white/5 border-white/5 text-slate-400"}`}>{status}</span>
+          </div>
+        </div>
+        <div className={`text-sm mb-6 font-medium h-10 ${isLight ? "text-slate-600" : "text-slate-400"}`}>{detail}</div>
       </div>
-      <div className={`text-sm mb-6 font-medium h-10 ${isLight ? "text-slate-600" : "text-slate-400"}`}>{detail}</div>
       <div className="flex items-center justify-between">
-        <div className={`text-xs font-black tracking-wider uppercase ${isLight ? "text-slate-900" : "text-white"}`}>{trend}</div>
+        <button onClick={onLaunch} className={`text-xs font-black tracking-wider uppercase px-4 py-2 rounded-xl transition-all ${isLight ? "bg-slate-200/50 text-slate-900 hover:bg-slate-200" : "bg-white/10 text-white hover:bg-white/20"}`}>{trend}</button>
         <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isLight ? "bg-slate-200/50 text-slate-600 group-hover:bg-slate-200" : "bg-white/5 text-white group-hover:bg-white/10"}`}><ChevronRight size={16} /></div>
       </div>
     </div>
@@ -723,13 +837,13 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
               <p className="text-sm text-slate-400">Choose between light and dark mode for the control panel.</p>
             </div>
             <div className={`flex p-1 rounded-xl border border-[var(--dashboard-border)] ${appConfig.theme === "light" ? "bg-slate-200" : "bg-black/20"}`}>
-              <button 
+              <button
                 onClick={() => onSaveApp({ ...appConfig, theme: "light" })}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${appConfig.theme === "light" ? "bg-white text-slate-900 shadow-xl" : "text-slate-500 hover:text-slate-300"}`}
               >
                 <Sun size={16} /> Light
               </button>
-              <button 
+              <button
                 onClick={() => onSaveApp({ ...appConfig, theme: "dark" })}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${appConfig.theme === "dark" ? "bg-blue-600 text-white shadow-xl shadow-blue-600/20" : "text-slate-500 hover:text-slate-300"}`}
               >
@@ -743,7 +857,7 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
               <div className={`text-lg font-bold ${appConfig.theme === "light" ? "text-slate-900" : "text-white"}`}>Launch at Startup</div>
               <p className="text-sm text-slate-400">Automatically start Widgitron when you log in to Windows.</p>
             </div>
-            <button 
+            <button
               onClick={onToggleAutostart}
               className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${isAutostart ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/20" : "bg-black/40 text-slate-500 border border-white/10"}`}
             >
@@ -778,7 +892,7 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
                 <input type="number" value={s.port || 22} onChange={e => updateServer(i, "port", parseInt(e.target.value))} className={`w-full px-4 py-2 rounded-xl text-sm font-bold border transition-all ${appConfig.theme === "light" ? "bg-slate-50 border-slate-200 text-slate-900 focus:bg-white" : "bg-black/40 border-white/10 text-white focus:bg-black/60"}`} />
               </div>
               <div className="col-span-4 flex items-center gap-4 pt-2">
-                <button 
+                <button
                   onClick={() => updateServer(i, "use_slurm", !s.use_slurm)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${s.use_slurm ? "bg-amber-500/20 text-amber-400 border border-amber-500/20 shadow-lg shadow-amber-500/10" : "bg-black/40 text-slate-500 border border-white/5 hover:border-white/20"}`}
                 >
@@ -806,7 +920,7 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
                 <label className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-600" : "text-slate-300"}`}>Target CCF Ranks</label>
                 <div className="flex flex-wrap gap-2">
                   {["A", "B", "C", "N"].map(r => (
-                    <button 
+                    <button
                       key={r}
                       onClick={() => {
                         const ranks = localPaper.filter_by_rank || [];
@@ -825,7 +939,7 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
                 <label className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-600" : "text-slate-300"}`}>Categories</label>
                 <div className="flex flex-wrap gap-2">
                   {["AI", "CV", "NLP", "HCI", "DM", "Graphics", "Security", "Network", "Systems"].map(cat => (
-                    <button 
+                    <button
                       key={cat}
                       onClick={() => {
                         const subs = localPaper.filter_by_sub || [];
@@ -845,7 +959,7 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
               <div className="space-y-3">
                 <label className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-600" : "text-slate-300"}`}>Display Options</label>
                 <div className="flex items-center gap-4">
-                  <button 
+                  <button
                     onClick={() => {
                       const nextConfig = { ...localPaper, show_past_deadlines: !localPaper.show_past_deadlines };
                       setLocalPaper(nextConfig);
@@ -861,12 +975,12 @@ function SettingsPanel({ gpuConfig, paperConfig, appConfig, onSaveGpu, onSavePap
                   <label className={`text-sm font-bold ${appConfig.theme === "light" ? "text-slate-600" : "text-slate-300"}`}>Max Display Count</label>
                   <span className="text-xs font-black text-blue-500 bg-blue-500/10 px-2 py-0.5 rounded-md">{localPaper.max_deadlines || 5}</span>
                 </div>
-                <input 
-                  type="range" 
-                  min="5" 
-                  max="100" 
+                <input
+                  type="range"
+                  min="5"
+                  max="100"
                   step="5"
-                  value={localPaper.max_deadlines || 5} 
+                  value={localPaper.max_deadlines || 5}
                   onChange={(e) => {
                     const next = parseInt(e.target.value);
                     const nextConfig = { ...localPaper, max_deadlines: next };
@@ -891,7 +1005,7 @@ function CopyButton({ text }: { text: string }) {
   const handleCopy = async (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     const doCopy = async () => {
       try {
         if (navigator.clipboard && window.isSecureContext) {
@@ -929,7 +1043,7 @@ function CopyButton({ text }: { text: string }) {
   };
 
   return (
-    <button 
+    <button
       onClick={handleCopy}
       onMouseDown={(e) => e.stopPropagation()}
       className="p-1 hover:bg-white/10 rounded transition-colors text-slate-400/40 hover:text-blue-400 flex items-center justify-center pointer-events-auto"

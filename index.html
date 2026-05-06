@@ -5,6 +5,16 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tauri + React + Typescript</title>
+    <script>
+      (function() {
+        const theme = localStorage.getItem('widgitron-theme') || 'dark';
+        if (theme === 'light') {
+          document.documentElement.style.backgroundColor = '#f8fafc';
+        } else {
+          document.documentElement.style.backgroundColor = '#0f172a';
+        }
+      })();
+    </script>
   </head>
 
   <body>

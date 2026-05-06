@@ -30,3 +30,4 @@ lazy_static = "1.4"
 shellexpand = "3.1"
 tauri-plugin-autostart = "2"
 tauri-plugin-window-state = "2"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse"] }
