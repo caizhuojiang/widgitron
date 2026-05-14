@@ -62,11 +62,21 @@ body {
 }
 
 .dashboard-accent-border {
-  border: 2px solid rgba(255, 255, 255, 0.4) !important;
+  border: none !important;
+}
+
+.dashboard-accent-border::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  z-index: 9999;
 }
  
-.light-theme .dashboard-accent-border {
-  border: 1.5px solid #94a3b8 !important;
+.light-theme.dashboard-accent-border::after {
+  box-shadow: inset 0 0 0 1px #cbd5e1;
 }
 
 /* Custom Scrollbar */

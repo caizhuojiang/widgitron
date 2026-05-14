@@ -7,6 +7,22 @@
             "password": null,
             "key_file": null,
             "use_slurm": null
+        },
+        {
+            "host": "10.162.13.10",
+            "port": 22,
+            "user": "zhuojiang",
+            "password": null,
+            "key_file": null,
+            "use_slurm": null
+        },
+        {
+            "host": "login.ai.lrz.de",
+            "port": 22,
+            "user": "go75boj",
+            "password": null,
+            "key_file": "~/.ssh/id_rsa",
+            "use_slurm": true
         }
     ],
     "update_interval": 1
