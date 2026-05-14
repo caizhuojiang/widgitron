@@ -15,7 +15,10 @@
 
 Widgitron is a modern, cross-platform dashboard built with **Tauri**, **Rust**, and **React**. It provides a premium, glassmorphic UI for monitoring GPUs, conference deadlines, and arxiv research papers.
 
-<img src="assets/screenshot.jpg" alt="Widgitron Dashboard and Widgets" width="800">
+<p align="center">
+  <img src="assets/deadline_demo.gif" width="49%" />
+  <img src="assets/arxiv_radar_demo.gif" width="47%" />
+</p>
 
 ## 🗺️ Roadmap
 
